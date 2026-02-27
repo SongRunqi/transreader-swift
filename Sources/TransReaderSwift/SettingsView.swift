@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var excludedUrlsText: String = ""
     @State private var customPrompt: String = ""
     @State private var vocabFilePath: String = ""
+    @State private var shortcuts: [String: String] = [:]
     
     init(appState: AppState, showSettings: Binding<Bool>) {
         self._appState = Bindable(appState)
@@ -28,6 +29,7 @@ struct SettingsView: View {
         self._customPrompt = State(initialValue: config.systemPrompt ?? "")
         self._vocabFilePath = State(initialValue: config.vocabFile)
         self._apiKey = State(initialValue: config.apiKeys[config.provider] ?? "")
+        self._shortcuts = State(initialValue: config.shortcuts)
     }
     
     var body: some View {
@@ -85,6 +87,22 @@ struct SettingsView: View {
                 }
             }
             
+            Section("快捷键") {
+                ForEach(Array(shortcuts.keys.sorted()), id: \.self) { key in
+                    HStack {
+                        Text(actionName(key))
+                            .frame(width: 120, alignment: .leading)
+                        
+                        TextField("", text: Binding(
+                            get: { shortcuts[key] ?? "" },
+                            set: { shortcuts[key] = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .help("格式: cmd+t, cmd+shift+w, etc.")
+                    }
+                }
+            }
+            
             Section("生词本") {
                 TextField("生词本路径", text: $vocabFilePath)
                     .textFieldStyle(.roundedBorder)
@@ -122,6 +140,17 @@ struct SettingsView: View {
         .navigationTitle("设置")
     }
     
+    private func actionName(_ key: String) -> String {
+        switch key {
+        case "capture_translate": return "截取翻译"
+        case "toggle_window": return "显示/隐藏窗口"
+        case "toggle_pin": return "窗口置顶"
+        case "toggle_monitor": return "划词监控"
+        case "quit": return "退出"
+        default: return key
+        }
+    }
+    
     private func saveSettings() {
         appState.configStore.update { config in
             config.provider = selectedProvider
@@ -137,7 +166,14 @@ struct SettingsView: View {
                 .filter { !$0.isEmpty }
             config.systemPrompt = customPrompt.isEmpty ? nil : customPrompt
             config.vocabFile = vocabFilePath
+            config.shortcuts = shortcuts
         }
+        
+        // Update monitor settings
+        appState.updateMonitorSettings()
+        
+        // Update hotkeys
+        appState.updateHotkeys()
         
         showSettings = false
     }

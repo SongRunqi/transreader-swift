@@ -4,6 +4,49 @@ struct ContentView: View {
     @Bindable var appState: AppState
     @Binding var showSettings: Bool
     
+    @State private var selectedTab = "history"
+    
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            NavigationView {
+                HistoryAndDetailView(appState: appState, showSettings: $showSettings)
+            }
+            .tabItem {
+                Label("历史", systemImage: "clock")
+            }
+            .tag("history")
+            
+            NavigationView {
+                VocabView(vocabStore: appState.vocabStore)
+            }
+            .tabItem {
+                Label("生词本", systemImage: "book")
+            }
+            .tag("vocab")
+            
+            NavigationView {
+                if showSettings {
+                    SettingsView(appState: appState, showSettings: $showSettings)
+                } else {
+                    Text("设置")
+                        .onAppear {
+                            showSettings = true
+                        }
+                }
+            }
+            .tabItem {
+                Label("设置", systemImage: "gearshape")
+            }
+            .tag("settings")
+        }
+        .navigationTitle("TransReader")
+    }
+}
+
+struct HistoryAndDetailView: View {
+    @Bindable var appState: AppState
+    @Binding var showSettings: Bool
+    
     var body: some View {
         NavigationSplitView {
             HistoryList(appState: appState)
@@ -17,7 +60,6 @@ struct ContentView: View {
                 PlaceholderView()
             }
         }
-        .navigationTitle("TransReader")
         .toolbar {
             ToolbarItemGroup {
                 if appState.isTranslating {
@@ -29,13 +71,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
                 }
-                
-                Button {
-                    showSettings.toggle()
-                } label: {
-                    Image(systemName: "gearshape")
-                }
-                .help("设置")
             }
         }
         .alert("错误", isPresented: .constant(appState.error != nil)) {

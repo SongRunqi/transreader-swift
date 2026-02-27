@@ -8,6 +8,11 @@ final class AppState {
     let vocabStore: VocabStore
     let translator: Translator
     let ocrEngine: OCREngine
+    let dictionaryService: DictionaryService
+    
+    private var selectionMonitor: SelectionMonitor?
+    private var globalHotkeys: GlobalHotkeys?
+    var monitorEnabled = false
     
     var translationHistory: [TranslationResult] = []
     var currentTranslation: TranslationResult?
@@ -17,11 +22,122 @@ final class AppState {
     
     var windowPinned = false
     
+    // Callbacks for hotkeys (set by view)
+    var onCaptureTranslate: (() -> Void)?
+    var onToggleWindow: (() -> Void)?
+    var onTogglePin: (() -> Void)?
+    var onQuit: (() -> Void)?
+    
     init() {
         self.configStore = ConfigStore()
         self.vocabStore = VocabStore(path: configStore.config.vocabFile)
         self.translator = Translator(configStore: configStore)
         self.ocrEngine = OCREngine()
+        self.dictionaryService = DictionaryService(configStore: configStore)
+        
+        // Initialize monitor (but don't start)
+        let callback: @Sendable (String, Bool) -> Void = { [weak self] text, isWord in
+            Task { @MainActor in
+                guard let self = self else { return }
+                // TODO: Implement dictionary lookup for single words
+                // For now, translate all text
+                self.translate(text, source: .selection)
+            }
+        }
+        
+        self.selectionMonitor = SelectionMonitor(
+            callback: callback,
+            pollInterval: Double(configStore.config.monitorInterval) / 1000.0,
+            excludedApps: configStore.config.excludedApps,
+            excludedUrls: configStore.config.excludedUrls,
+            clipboardTranslateEnabled: configStore.config.clipboardTranslateEnabled
+        )
+        
+        // Start if configured
+        if configStore.config.monitorEnabled {
+            Task {
+                await startMonitor()
+            }
+        }
+    }
+    
+    func setupHotkeys() {
+        let callbacks: [HotkeyAction: () -> Void] = [
+            .captureTranslate: { [weak self] in
+                Task { @MainActor in
+                    self?.onCaptureTranslate?()
+                }
+            },
+            .toggleWindow: { [weak self] in
+                Task { @MainActor in
+                    self?.onToggleWindow?()
+                }
+            },
+            .togglePin: { [weak self] in
+                Task { @MainActor in
+                    self?.onTogglePin?()
+                }
+            },
+            .toggleMonitor: { [weak self] in
+                Task { @MainActor in
+                    self?.toggleMonitor()
+                }
+            },
+            .quit: { [weak self] in
+                Task { @MainActor in
+                    self?.onQuit?()
+                }
+            }
+        ]
+        
+        self.globalHotkeys = GlobalHotkeys(
+            shortcuts: configStore.config.shortcuts,
+            callbacks: callbacks
+        )
+        
+        Task {
+            await globalHotkeys?.register()
+        }
+    }
+    
+    func updateHotkeys() {
+        Task {
+            await globalHotkeys?.updateShortcuts(configStore.config.shortcuts)
+        }
+    }
+    
+    func startMonitor() async {
+        guard let monitor = selectionMonitor else { return }
+        await monitor.start()
+        monitorEnabled = true
+    }
+    
+    func stopMonitor() async {
+        guard let monitor = selectionMonitor else { return }
+        await monitor.stop()
+        monitorEnabled = false
+    }
+    
+    func toggleMonitor() {
+        Task {
+            if monitorEnabled {
+                await stopMonitor()
+                configStore.setMonitorEnabled(false)
+            } else {
+                await startMonitor()
+                configStore.setMonitorEnabled(true)
+            }
+        }
+    }
+    
+    func updateMonitorSettings() {
+        Task {
+            guard let monitor = selectionMonitor else { return }
+            await monitor.updateInterval(Double(configStore.config.monitorInterval) / 1000.0)
+            await monitor.updateExcludedApps(configStore.config.excludedApps)
+            await monitor.updateExcludedUrls(configStore.config.excludedUrls)
+            await monitor.updateClipboardTranslate(configStore.config.clipboardTranslateEnabled)
+        }
     }
     
     func translate(_ text: String, source: TranslationSource) {

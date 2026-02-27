@@ -165,3 +165,14 @@ struct VocabData: Codable, Sendable {
     
     static let empty = VocabData(version: 1, words: [])
 }
+
+// Make VocabEntry Hashable
+extension VocabEntry: Hashable {
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(word)
+    }
+    
+    static func == (lhs: VocabEntry, rhs: VocabEntry) -> Bool {
+        lhs.word == rhs.word
+    }
+}
