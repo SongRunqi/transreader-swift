@@ -54,9 +54,10 @@ final class VocabStore: @unchecked Sendable {
         var updated = data
         updated.words.append(newEntry)
         Self.save(updated, to: vocabURL)
-        
+
+        let snapshot = updated
         DispatchQueue.main.async {
-            self.data = updated
+            self.data = snapshot
         }
         
         return true
@@ -68,13 +69,14 @@ final class VocabStore: @unchecked Sendable {
         
         var updated = data
         updated.words.removeAll { $0.word.lowercased() == wordLower }
-        
+
         guard updated.words.count < originalCount else { return false }
-        
+
         Self.save(updated, to: vocabURL)
-        
+
+        let snapshot = updated
         DispatchQueue.main.async {
-            self.data = updated
+            self.data = snapshot
         }
         
         return true
@@ -83,10 +85,56 @@ final class VocabStore: @unchecked Sendable {
     func searchWords(_ query: String) -> [VocabEntry] {
         let queryLower = query.lowercased()
         guard !queryLower.isEmpty else { return data.words }
-        
+
         return data.words.filter { entry in
             entry.word.lowercased().contains(queryLower) ||
             entry.meanings?.joined().lowercased().contains(queryLower) == true
         }
+    }
+
+    // MARK: - Export / Import
+
+    func exportData() -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try? encoder.encode(data)
+    }
+
+    /// Import words from JSON data, merging with existing (skip duplicates).
+    /// Returns (added, skipped) counts, or nil if decoding failed.
+    func importData(_ jsonData: Data) -> (added: Int, skipped: Int)? {
+        guard let imported = try? JSONDecoder().decode(VocabData.self, from: jsonData) else {
+            return nil
+        }
+
+        let existingWords = Set(data.words.map { $0.word.lowercased() })
+        var added = 0
+        var skipped = 0
+        var updated = data
+
+        for entry in imported.words {
+            let word = entry.word.lowercased().trimmingCharacters(in: .whitespaces)
+            if existingWords.contains(word) {
+                skipped += 1
+            } else {
+                var newEntry = entry
+                newEntry.word = word
+                if newEntry.addedAt.isEmpty {
+                    newEntry.addedAt = ISO8601DateFormatter().string(from: Date())
+                }
+                updated.words.append(newEntry)
+                added += 1
+            }
+        }
+
+        if added > 0 {
+            Self.save(updated, to: vocabURL)
+            let snapshot = updated
+            DispatchQueue.main.async {
+                self.data = snapshot
+            }
+        }
+
+        return (added: added, skipped: skipped)
     }
 }

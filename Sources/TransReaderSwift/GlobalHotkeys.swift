@@ -7,82 +7,101 @@ enum HotkeyAction: String {
     case toggleWindow = "toggle_window"
     case togglePin = "toggle_pin"
     case toggleMonitor = "toggle_monitor"
-    case quit = "quit"
+    case enhanceTranslate = "enhance_translate"
+    case pasteTranslate = "paste_translate"
 }
 
 actor GlobalHotkeys {
-    private var monitors: [Any] = []
+    private nonisolated(unsafe) var globalMonitor: Any?
+    private nonisolated(unsafe) var localMonitor: Any?
     private var shortcuts: [String: String] = [:]
     private let callbacks: [HotkeyAction: () -> Void]
-    
+
+    /// Parsed shortcut table: (modifiers, keyCode) → (action, callback)
+    private var hotkeyTable: [(modifiers: NSEvent.ModifierFlags, keyCode: UInt16, actionKey: String, callback: () -> Void)] = []
+
+    /// Only compare these modifier flags — ignore capsLock, function, numericPad, etc.
+    private static let relevantFlags: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
+
     init(shortcuts: [String: String], callbacks: [HotkeyAction: () -> Void]) {
         self.shortcuts = shortcuts
         self.callbacks = callbacks
     }
-    
+
+    deinit {
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+    }
+
     func register() {
         unregister()
-        
+
+        // Build lookup table
+        hotkeyTable.removeAll()
         for (actionKey, shortcut) in shortcuts {
             guard let action = HotkeyAction(rawValue: actionKey),
                   let callback = callbacks[action],
                   let (modifiers, keyCode) = parseShortcut(shortcut) else {
+                appLog("[Hotkeys] Failed to parse: \(actionKey) → \(shortcut)")
                 continue
             }
-            
-            // Create global event monitor
-            let monitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
-                guard event.keyCode == keyCode,
-                      event.modifierFlags.intersection(.deviceIndependentFlagsMask) == modifiers else {
+
+            hotkeyTable.append((modifiers: modifiers, keyCode: keyCode, actionKey: actionKey, callback: callback))
+            appLog("[Hotkeys] Registered: \(actionKey) → \(shortcut) (keyCode=\(keyCode), modifiers=\(modifiers.rawValue))")
+        }
+
+        let table = hotkeyTable
+        let relevant = Self.relevantFlags
+
+        // Single global monitor for when other apps are active
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            let pressed = event.modifierFlags.intersection(relevant)
+            for entry in table {
+                if event.keyCode == entry.keyCode && pressed == entry.modifiers {
+                    appLog("[Hotkeys] Triggered (global): \(entry.actionKey)")
+                    entry.callback()
                     return
                 }
-                
-                callback()
             }
-            
-            if let monitor = monitor {
-                monitors.append(monitor)
-            }
-            
-            // Also add local monitor (for when app is active)
-            let localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                guard event.keyCode == keyCode,
-                      event.modifierFlags.intersection(.deviceIndependentFlagsMask) == modifiers else {
-                    return event
+        }
+
+        // Single local monitor for when TransReader is active
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let pressed = event.modifierFlags.intersection(relevant)
+            for entry in table {
+                if event.keyCode == entry.keyCode && pressed == entry.modifiers {
+                    appLog("[Hotkeys] Triggered (local): \(entry.actionKey)")
+                    entry.callback()
+                    return nil  // Event consumed
                 }
-                
-                callback()
-                return nil  // Event consumed
             }
-            
-            if let localMonitor = localMonitor {
-                monitors.append(localMonitor)
-            }
+            return event
         }
     }
-    
+
     func unregister() {
-        for monitor in monitors {
-            NSEvent.removeMonitor(monitor)
-        }
-        monitors.removeAll()
+        if let m = globalMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+        globalMonitor = nil
+        localMonitor = nil
+        hotkeyTable.removeAll()
     }
-    
+
     func updateShortcuts(_ shortcuts: [String: String]) {
         self.shortcuts = shortcuts
         register()
     }
-    
+
     private func parseShortcut(_ shortcut: String) -> (NSEvent.ModifierFlags, UInt16)? {
-        // Expected format: "cmd+t", "cmd+shift+w", etc.
         let parts = shortcut.lowercased().components(separatedBy: "+")
-        guard parts.count >= 2 else { return nil }
-        
+        guard !parts.isEmpty else { return nil }
+
         var modifiers: NSEvent.ModifierFlags = []
         var keyChar = ""
-        
+
         for part in parts {
-            switch part {
+            let trimmed = part.trimmingCharacters(in: .whitespaces)
+            switch trimmed {
             case "cmd", "command":
                 modifiers.insert(.command)
             case "shift":
@@ -92,20 +111,24 @@ actor GlobalHotkeys {
             case "ctrl", "control":
                 modifiers.insert(.control)
             default:
-                keyChar = part
+                keyChar = trimmed
             }
         }
-        
+
+        // If no modifiers were specified and it's a single char, default to option+cmd
+        if modifiers.isEmpty && keyChar.count == 1 {
+            modifiers = [.option, .command]
+        }
+
         guard !keyChar.isEmpty,
               let keyCode = keyCodeForChar(keyChar) else {
             return nil
         }
-        
+
         return (modifiers, keyCode)
     }
-    
+
     private func keyCodeForChar(_ char: String) -> UInt16? {
-        // Common key codes (US QWERTY layout)
         let keyMap: [String: UInt16] = [
             "a": 0x00, "s": 0x01, "d": 0x02, "f": 0x03, "h": 0x04,
             "g": 0x05, "z": 0x06, "x": 0x07, "c": 0x08, "v": 0x09,
@@ -120,9 +143,11 @@ actor GlobalHotkeys {
             "return": 0x24, "tab": 0x30, "space": 0x31, "delete": 0x33,
             "escape": 0x35, "f1": 0x7A, "f2": 0x78, "f3": 0x63, "f4": 0x76,
             "f5": 0x60, "f6": 0x61, "f7": 0x62, "f8": 0x64, "f9": 0x65,
-            "f10": 0x6D, "f11": 0x67, "f12": 0x6F
+            "f10": 0x6D, "f11": 0x67, "f12": 0x6F,
+            "left": 0x7B, "right": 0x7C, "down": 0x7D, "up": 0x7E,
+            "home": 0x73, "end": 0x77, "pageup": 0x74, "pagedown": 0x79
         ]
-        
+
         return keyMap[char.lowercased()]
     }
 }

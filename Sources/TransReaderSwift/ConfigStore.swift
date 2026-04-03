@@ -14,8 +14,17 @@ final class ConfigStore: @unchecked Sendable {
         // Ensure directory exists
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
         
-        // Load or create default
-        if let loaded = Self.load(from: configURL) {
+        // Load or create default, with backward compatibility
+        if var loaded = Self.load(from: configURL) {
+            // Migrate old excluded_apps → included_apps
+            if loaded.includedApps.isEmpty {
+                // Check if old config had excluded_apps by reading raw JSON
+                if let data = try? Data(contentsOf: configURL),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   json["excluded_apps"] != nil && json["included_apps"] == nil {
+                    loaded.includedApps = AppConfig.defaultIncludedApps
+                }
+            }
             self.config = loaded
         } else {
             self.config = .default
@@ -54,7 +63,15 @@ final class ConfigStore: @unchecked Sendable {
     var provider: String { config.provider }
     var apiKey: String? { config.apiKeys[config.provider] }
     var systemPrompt: String {
-        config.systemPrompt ?? Constants.defaultSystemPrompt
+        if let custom = config.systemPrompt, !custom.isEmpty {
+            return custom
+        }
+        switch config.displayMode {
+        case .analyze:
+            return Constants.defaultSystemPrompt
+        case .read:
+            return Constants.defaultSystemPromptRead
+        }
     }
     var requestTimeout: TimeInterval {
         TimeInterval(config.requestTimeout)
@@ -93,16 +110,34 @@ final class ConfigStore: @unchecked Sendable {
         update { $0.vocabFile = path }
     }
     
-    func setExcludedApps(_ apps: [String]) {
-        update { $0.excludedApps = apps }
+    func setIncludedApps(_ apps: [String]) {
+        update { $0.includedApps = apps }
     }
-    
+
     func setExcludedUrls(_ urls: [String]) {
         update { $0.excludedUrls = urls }
     }
-    
+
     func setRequestTimeout(_ timeout: Int) {
         update { $0.requestTimeout = max(10, min(timeout, 600)) }
+    }
+
+    func setDisplayMode(_ mode: DisplayMode) {
+        update { $0.displayMode = mode }
+    }
+
+    func setLongTextThreshold(_ threshold: Int) {
+        update { $0.longTextThreshold = max(100, min(threshold, 5000)) }
+    }
+
+    var displayMode: DisplayMode { config.displayMode }
+    var longTextThreshold: Int { config.longTextThreshold }
+
+    func modelForProvider(_ providerId: String) -> String {
+        if let custom = config.customModels[providerId], !custom.isEmpty {
+            return custom
+        }
+        return Providers.all[providerId]?.model ?? "deepseek-chat"
     }
 }
 
@@ -171,5 +206,56 @@ struct Constants {
    - children 内的元素如果仍有内部结构，继续添加 `children`（可多层嵌套）。
 6. 连词（and、but、or、rather than、because、although 等）单独作为 chunk，role 为"连词"；从句引导词（which、that、who、when 等）放在 children 内，role 为"引导词"。
 7. 只输出 JSON，不要输出任何其他内容。不要用 markdown 代码块包裹。
+"""
+
+    static let defaultSystemPromptRead = """
+你是一个专业的英文阅读教练，目标是帮助中文母语的技术学习者提升英文阅读能力。
+
+## 任务
+将用户给出的英文文本**逐句翻译**为中文，并对每个句子做详细语法分析。
+
+## 输出格式
+严格输出一个 JSON 数组，每个元素代表一个句子，格式如下：
+```json
+[
+  {
+    "en": "原文句子",
+    "zh": "中文翻译",
+    "analysis": {
+      "structure": "句子结构",
+      "tense": "时态",
+      "chunks": [...],
+      "tip": "语法提示"
+    }
+  }
+]
+```
+
+## 规则
+1. 按原文句子边界逐句翻译。**先输出 `en` 和 `zh`，再输出 `analysis`**。
+2. `zh`：自然流畅的中文意译。技术术语保留英文并括号注中文。
+3. 无论句子长短，每个句子都**必须**提供完整的 `analysis` 字段。
+4. `analysis` 必须包含 `structure`、`tense`、`chunks`、`tip` 四个字段。
+5. `chunks` 中任何包含内部语法结构的成分，都**必须**添加 `children` 数组递归拆分。
+6. 连词单独作为 chunk，role 为"连词"；从句引导词放在 children 内，role 为"引导词"。
+7. 只输出 JSON，不要输出任何其他内容。不要用 markdown 代码块包裹。
+"""
+
+    static let grammarFixSystemPrompt = """
+你是一个英文写作助手。请修正以下英文文本的语法和拼写错误，改善表达使其更加自然地道。
+
+## 规则
+1. 只修正语法、拼写和表达问题，不要改变原文含义。
+2. 保持原文的风格和语气。
+3. 只输出修正后的文本，不要输出任何解释或注释。
+"""
+
+    static let zhEnSystemPrompt = """
+你是一个专业的中英翻译助手。请将以下中文文本翻译为地道的英文。
+
+## 规则
+1. 翻译要自然流畅，符合英文表达习惯。
+2. 专业术语要准确。
+3. 只输出翻译后的英文文本，不要输出任何解释或注释。
 """
 }

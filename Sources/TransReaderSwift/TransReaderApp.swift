@@ -5,19 +5,47 @@ import AppKit
 struct TransReaderApp: App {
     @State private var appState = AppState()
     @State private var showSettings = false
-    
+    @Environment(\.openWindow) private var openWindow
+
+    private var menuBarTitle: String {
+        if let stage = appState.updateStage {
+            switch stage {
+            case .checking:       return "译🔍"
+            case .downloading:    return "译⬇️"
+            case .extracting, .installing: return "译📦"
+            case .relaunching:    return "译🔄"
+            }
+        }
+        if appState.isTranslating { return "译⏳" }
+        if appState.monitorEnabled { return "译👁" }
+        return "译"
+    }
+
     var body: some Scene {
-        MenuBarExtra(appState.monitorEnabled ? "译👁" : "译", systemImage: "character.book.closed") {
+        MenuBarExtra(menuBarTitle) {
             MenuBarView(appState: appState, showSettings: $showSettings)
+                .onAppear {
+                    // Open main window on first launch
+                    openWindow(id: "main")
+                }
         }
         .menuBarExtraStyle(.menu)
-        
+
         Window("TransReader", id: "main") {
             ContentView(appState: appState, showSettings: $showSettings)
                 .frame(minWidth: 480, minHeight: 400)
+                .translationErrorAlert(appState: appState)
+                .translocationAlert(appState: appState)
                 .onAppear {
                     setupHotkeyCallbacks()
                     appState.setupHotkeys()
+                    appState.waitForAccessibilityAndRestart()
+                    appState.notificationService.requestPermission()
+                    appState.handleTranslocationIfNeeded()
+                    // Show window on launch (like Python)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        showMainWindow()
+                    }
                 }
         }
         .defaultSize(width: 900, height: 700)
@@ -26,7 +54,7 @@ struct TransReaderApp: App {
             CommandGroup(replacing: .newItem) {}
         }
     }
-    
+
     private func setupHotkeyCallbacks() {
         appState.onCaptureTranslate = {
             Task { @MainActor in
@@ -34,17 +62,14 @@ struct TransReaderApp: App {
                     let text = try await appState.ocrEngine.captureScreen()
                     if !text.isEmpty {
                         appState.translate(text, source: .ocr)
-                        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
-                            window.makeKeyAndOrderFront(nil)
-                            NSApp.activate(ignoringOtherApps: true)
-                        }
+                        showMainWindow()
                     }
                 } catch {
                     appState.error = error.localizedDescription
                 }
             }
         }
-        
+
         appState.onToggleWindow = {
             if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
                 if window.isVisible {
@@ -55,7 +80,7 @@ struct TransReaderApp: App {
                 }
             }
         }
-        
+
         appState.onTogglePin = {
             if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
                 if window.level == .floating {
@@ -67,9 +92,29 @@ struct TransReaderApp: App {
                 }
             }
         }
-        
-        appState.onQuit = {
-            NSApplication.shared.terminate(nil)
+
+        appState.onEnhanceTranslate = {
+            appState.enhanceTranslate()
+        }
+
+        appState.onPasteTranslate = {
+            appState.pasteTranslate()
+            showMainWindow()
+        }
+
+        appState.onShowWindowNoActivate = { [openWindow] in
+            // Fallback path: if the window doesn't exist yet, create it via SwiftUI
+            openWindow(id: "main")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                appState.showWindowWithoutActivation()
+            }
+        }
+    }
+
+    private func showMainWindow() {
+        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 }
@@ -77,34 +122,38 @@ struct TransReaderApp: App {
 struct MenuBarView: View {
     @Bindable var appState: AppState
     @Binding var showSettings: Bool
-    
+
     @Environment(\.openWindow) private var openWindow
-    
+
     var body: some View {
-        Button("截取翻译") {
+        Button("截取翻译 (⌥⌘T)") {
             appState.onCaptureTranslate?()
         }
-        .keyboardShortcut("t", modifiers: .command)
-        
-        Button("显示/隐藏窗口") {
+
+        Button("写作辅助 (⌥⌘E)") {
+            appState.onEnhanceTranslate?()
+        }
+
+        Button("粘贴翻译 (⌥⌘V)") {
+            appState.onPasteTranslate?()
+        }
+
+        Button("显示/隐藏窗口 (⌥⌘W)") {
             appState.onToggleWindow?()
         }
-        .keyboardShortcut("w", modifiers: .command)
-        
-        Button(appState.windowPinned ? "窗口置顶: 开" : "窗口置顶") {
+
+        Button(appState.windowPinned ? "窗口置顶: 开 (⌥⌘P)" : "窗口置顶 (⌥⌘P)") {
             appState.onTogglePin?()
         }
-        .keyboardShortcut("p", modifiers: .command)
-        
+
         Divider()
-        
-        Button(appState.monitorEnabled ? "划词监控: 开" : "划词监控: 关") {
+
+        Button(appState.monitorEnabled ? "划词监控: 开 (⌥⌘M)" : "划词监控: 关 (⌥⌘M)") {
             appState.toggleMonitor()
         }
-        .keyboardShortcut("m", modifiers: .command)
-        
+
         Divider()
-        
+
         Menu("AI 服务商") {
             ForEach(Array(Providers.all.keys.sorted()), id: \.self) { providerID in
                 Button(action: {
@@ -119,14 +168,34 @@ struct MenuBarView: View {
                 }
             }
         }
-        
+
+        // Update menu item
+        if let pending = appState.pendingUpdate {
+            Button("更新到 v\(pending.version)") {
+                appState.performUpdate()
+            }
+            .disabled(appState.updateStage != nil)
+        } else {
+            Button("检查更新") {
+                appState.checkForUpdate()
+            }
+            .disabled(!Updater.isBundle || appState.updateStage != nil)
+        }
+
         Button("设置") {
             showSettings = true
             openWindow(id: "main")
+            // Bring window to front
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
+                    window.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+            }
         }
-        
+
         Divider()
-        
+
         Button("退出") {
             NSApplication.shared.terminate(nil)
         }

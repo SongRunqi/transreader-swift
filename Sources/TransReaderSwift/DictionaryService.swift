@@ -1,6 +1,6 @@
 import Foundation
 
-struct DictionaryEntry: Sendable {
+struct DictionaryEntry: Codable, Sendable {
     let word: String
     let phonetic: String?
     let meanings: [String]
@@ -11,9 +11,67 @@ struct DictionaryEntry: Sendable {
 
 actor DictionaryService {
     private let configStore: ConfigStore
-    
+
+    // Audio pronunciation cache: "word_type" → audio data
+    private var audioCache: [String: Data] = [:]
+    private var audioCacheOrder: [String] = []  // for LRU eviction
+    private let audioCacheLimit = 50
+
     init(configStore: ConfigStore) {
         self.configStore = configStore
+    }
+
+    // MARK: - Audio Pronunciation
+
+    func fetchAudio(for word: String, type: Int = 1) async throws -> Data {
+        let cacheKey = "\(word)_\(type)"
+
+        // Check cache
+        if let cached = audioCache[cacheKey] {
+            return cached
+        }
+
+        // Download from Youdao
+        let encoded = word.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? word
+        guard let url = URL(string: "https://dict.youdao.com/dictvoice?audio=\(encoded)&type=\(type)") else {
+            throw AudioError.invalidURL
+        }
+
+        let (data, response) = try await URLSession.shared.data(from: url)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            throw AudioError.downloadFailed
+        }
+
+        guard !data.isEmpty else {
+            throw AudioError.emptyData
+        }
+
+        // Store in cache with LRU eviction
+        audioCache[cacheKey] = data
+        audioCacheOrder.removeAll { $0 == cacheKey }
+        audioCacheOrder.append(cacheKey)
+        if audioCacheOrder.count > audioCacheLimit {
+            let evicted = audioCacheOrder.removeFirst()
+            audioCache.removeValue(forKey: evicted)
+        }
+
+        return data
+    }
+
+    enum AudioError: LocalizedError {
+        case invalidURL
+        case downloadFailed
+        case emptyData
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidURL: return "无效的音频 URL"
+            case .downloadFailed: return "音频下载失败"
+            case .emptyData: return "音频数据为空"
+            }
+        }
     }
     
     func lookupWord(_ word: String) async throws -> DictionaryEntry {
@@ -155,7 +213,7 @@ actor DictionaryService {
         """
         
         let payload: [String: Any] = [
-            "model": provider.model,
+            "model": configStore.modelForProvider(configStore.provider),
             "temperature": 0.3,
             "messages": [
                 ["role": "user", "content": prompt]
