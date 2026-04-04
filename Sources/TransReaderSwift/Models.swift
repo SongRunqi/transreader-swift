@@ -1,5 +1,12 @@
 import Foundation
 
+extension String {
+    /// Strip HTML tags like <b>, </b> etc.
+    func stripHTML() -> String {
+        replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+    }
+}
+
 // MARK: - Provider Configuration
 struct Provider: Codable, Sendable {
     let id: String
@@ -26,11 +33,15 @@ struct Providers {
 }
 
 // MARK: - Translation Models
-struct Chunk: Codable, Sendable {
+struct Chunk: Codable, Sendable, Equatable {
     let en: String
     let zh: String
     let role: String
     let children: [Chunk]?
+
+    enum CodingKeys: String, CodingKey {
+        case en, zh, role, children, text
+    }
 
     init(en: String, zh: String, role: String, children: [Chunk]?) {
         self.en = en; self.zh = zh; self.role = role; self.children = children
@@ -38,14 +49,23 @@ struct Chunk: Codable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        en = try c.decodeIfPresent(String.self, forKey: .en) ?? ""
+        let text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
+        en = try c.decodeIfPresent(String.self, forKey: .en) ?? text
         zh = try c.decodeIfPresent(String.self, forKey: .zh) ?? ""
         role = try c.decodeIfPresent(String.self, forKey: .role) ?? ""
         children = try c.decodeIfPresent([Chunk].self, forKey: .children)
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(en, forKey: .en)
+        try c.encode(zh, forKey: .zh)
+        try c.encode(role, forKey: .role)
+        try c.encodeIfPresent(children, forKey: .children)
+    }
 }
 
-struct Analysis: Codable, Sendable {
+struct Analysis: Codable, Sendable, Equatable {
     let structure: String
     let tense: String
     let chunks: [Chunk]
@@ -72,7 +92,7 @@ struct Sentence: Codable, Sendable {
     var index: Int
 
     enum CodingKeys: String, CodingKey {
-        case en, zh, analysis
+        case en, zh, analysis, structure, tense, tip
         case isPartial = "_partial"
         case index = "_idx"
     }
@@ -82,13 +102,42 @@ struct Sentence: Codable, Sendable {
         self.isPartial = isPartial; self.index = index
     }
 
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(en, forKey: .en)
+        try c.encode(zh, forKey: .zh)
+        try c.encodeIfPresent(analysis, forKey: .analysis)
+        if let a = analysis {
+            if !a.structure.isEmpty { try c.encode(a.structure, forKey: .structure) }
+            if !a.tense.isEmpty { try c.encode(a.tense, forKey: .tense) }
+            if !a.tip.isEmpty { try c.encode(a.tip, forKey: .tip) }
+        }
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        en = try c.decode(String.self, forKey: .en)
-        zh = try c.decode(String.self, forKey: .zh)
-        analysis = try c.decodeIfPresent(Analysis.self, forKey: .analysis)
+        en = try c.decodeIfPresent(String.self, forKey: .en) ?? ""
+        zh = try c.decodeIfPresent(String.self, forKey: .zh) ?? ""
         isPartial = try c.decodeIfPresent(Bool.self, forKey: .isPartial) ?? false
         index = try c.decodeIfPresent(Int.self, forKey: .index) ?? 0
+
+        // Python format: structure/tense/tip at top level, analysis only has chunks
+        let topStructure = try c.decodeIfPresent(String.self, forKey: .structure) ?? ""
+        let topTense = try c.decodeIfPresent(String.self, forKey: .tense) ?? ""
+        let topTip = try c.decodeIfPresent(String.self, forKey: .tip) ?? ""
+        let rawAnalysis = try c.decodeIfPresent(Analysis.self, forKey: .analysis)
+
+        // Merge: top-level fields take priority, fall back to analysis-nested fields
+        let structure = !topStructure.isEmpty ? topStructure : (rawAnalysis?.structure ?? "")
+        let tense = !topTense.isEmpty ? topTense : (rawAnalysis?.tense ?? "")
+        let tip = !topTip.isEmpty ? topTip : (rawAnalysis?.tip ?? "")
+        let chunks = rawAnalysis?.chunks ?? []
+
+        if !structure.isEmpty || !tense.isEmpty || !chunks.isEmpty || !tip.isEmpty {
+            analysis = Analysis(structure: structure, tense: tense, chunks: chunks, tip: tip)
+        } else {
+            analysis = nil
+        }
     }
 }
 
@@ -122,6 +171,9 @@ struct TranslationResult: Sendable, Hashable {
 
     static func == (lhs: TranslationResult, rhs: TranslationResult) -> Bool {
         lhs.timestamp == rhs.timestamp
+            && lhs.sentences == rhs.sentences
+            && lhs.elapsedMs == rhs.elapsedMs
+            && lhs.wasCancelled == rhs.wasCancelled
     }
 }
 
@@ -132,7 +184,9 @@ extension Sentence: Hashable {
     }
     
     static func == (lhs: Sentence, rhs: Sentence) -> Bool {
-        lhs.en == rhs.en && lhs.index == rhs.index
+        lhs.en == rhs.en && lhs.zh == rhs.zh
+            && lhs.index == rhs.index && lhs.isPartial == rhs.isPartial
+            && lhs.analysis == rhs.analysis
     }
 }
 
@@ -309,10 +363,29 @@ struct VocabEntry: Codable, Sendable {
     var examples: [String]?
     var synonyms: [String]?
     var addedAt: String
-    
+    // Python compat fields
+    var pos: String?
+    var meaning: String?
+    var zh: String?
+    var context: String?
+
     enum CodingKeys: String, CodingKey {
-        case word, phonetic, meanings, examples, synonyms
+        case word, phonetic, meanings, examples, synonyms, pos, meaning, zh, context
         case addedAt = "added_at"
+    }
+
+    /// Combined display meanings: from `meanings[]` or fallback to Python `pos: zh`
+    var displayMeanings: [String] {
+        if let m = meanings, !m.isEmpty { return m.map { $0.stripHTML() } }
+        // Build from Python fields — prefer short `zh`, fallback to `meaning`
+        if let p = pos, !p.isEmpty, let z = zh, !z.isEmpty {
+            return ["\(p) \(z)"]
+        } else if let z = zh, !z.isEmpty {
+            return [z]
+        } else if let m = meaning, !m.isEmpty {
+            return [m.stripHTML()]
+        }
+        return []
     }
 }
 

@@ -1,5 +1,70 @@
 import SwiftUI
 
+// MARK: - Hover Icon Button
+private struct HoverIconButton: View {
+    let icon: String
+    let size: CGFloat
+    let color: Color
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: size))
+                .foregroundStyle(isHovered ? Theme.accent : color)
+                .frame(width: size + 10, height: size + 10)
+                .background(isHovered ? Theme.accent.opacity(0.1) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Shared: Analysis Meta Tags (structure + tense pills)
+struct AnalysisMetaTags: View {
+    let structure: String
+    let tense: String
+
+    init(_ analysis: Analysis) {
+        self.structure = analysis.structure
+        self.tense = analysis.tense
+    }
+
+    init(structure: String = "", tense: String = "") {
+        self.structure = structure
+        self.tense = tense
+    }
+
+    var body: some View {
+        if !structure.isEmpty || !tense.isEmpty {
+            HStack(spacing: 6) {
+                if !structure.isEmpty {
+                    Text(structure)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 2)
+                        .background(Theme.tertiaryBg)
+                        .cornerRadius(4)
+                }
+                if !tense.isEmpty {
+                    Text(tense)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.teal)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 2)
+                        .background(Theme.tertiaryBg)
+                        .cornerRadius(4)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Translation Block (one per translation request)
 struct TranslationBlockView: View {
     let result: TranslationResult
@@ -38,26 +103,18 @@ struct TranslationBlockView: View {
 
                 // In-progress indicator + cancel
                 if isActive && onCancel != nil && !result.wasCancelled {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         Circle()
                             .fill(Theme.accent)
                             .frame(width: 6, height: 6)
                             .opacity(0.8)
                             .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isActive)
-                        Text("翻译中...")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Theme.textSecondary)
-                        Button {
+                        HoverIconButton(icon: "xmark.circle", size: 10, color: Theme.textSecondary) {
                             onCancel?()
-                        } label: {
-                            Image(systemName: "xmark.circle")
-                                .font(.system(size: 12))
-                                .foregroundStyle(Theme.textSecondary)
                         }
-                        .buttonStyle(.plain)
-                        .focusable(false)
                         .help("取消翻译")
                     }
+                    .fixedSize()
                 }
 
                 // Cancelled label
@@ -72,27 +129,17 @@ struct TranslationBlockView: View {
                 HStack(spacing: 8) {
                     // Retranslate button
                     if let onRetranslate = onRetranslate {
-                        Button {
+                        HoverIconButton(icon: "arrow.clockwise", size: 10, color: Theme.textSecondary.opacity(0.6)) {
                             onRetranslate(result.sourceText)
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Theme.textSecondary.opacity(0.6))
                         }
-                        .buttonStyle(.plain)
                         .help("重新翻译")
                     }
 
                     // Copy source text
-                    Button {
+                    HoverIconButton(icon: "doc.on.doc", size: 10, color: Theme.textSecondary.opacity(0.6)) {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(result.sourceText, forType: .string)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Theme.textSecondary.opacity(0.6))
                     }
-                    .buttonStyle(.plain)
                     .help("复制原文")
 
                     Text(result.source.rawValue)
@@ -102,6 +149,7 @@ struct TranslationBlockView: View {
                         .padding(.vertical, 2)
                         .background(Theme.tertiaryBg)
                         .cornerRadius(3)
+                        .fixedSize()
                 }
             }
             .padding(.bottom, 12)
@@ -132,6 +180,16 @@ struct SentenceBlockView: View {
     var onWordLookup: ((String) -> Void)?
     @State private var showAnalysis = false
 
+    // Resolved analysis — always available (empty when no data yet)
+    private var analysis: Analysis {
+        sentence.analysis ?? Analysis(structure: "", tense: "", chunks: [], tip: "")
+    }
+
+    private var analysisHasContent: Bool {
+        let a = analysis
+        return !a.structure.isEmpty || !a.tense.isEmpty || !a.chunks.isEmpty || !a.tip.isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if displayMode == .read {
@@ -140,108 +198,115 @@ struct SentenceBlockView: View {
                 analyzeModeContent
             }
 
-            // Streaming indicator (same for both modes)
+            // Streaming indicator
             if sentence.isPartial {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.mini)
-                    if sentence.en.isEmpty {
-                        Text("翻译中...")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }
-                .padding(.top, sentence.en.isEmpty ? 0 : 2)
+                ProgressView()
+                    .controlSize(.mini)
+                    .padding(.top, 2)
             }
         }
         .padding(.vertical, 4)
+        .onChange(of: analysisHasContent) { _, hasContent in
+            // Auto-expand when analysis content first arrives during streaming
+            if hasContent && sentence.isPartial {
+                showAnalysis = true
+            }
+        }
+        .onChange(of: sentence.isPartial) { oldValue, newValue in
+            // Keep analysis expanded when streaming finishes
+            if oldValue == true && newValue == false && analysisHasContent {
+                showAnalysis = true
+            }
+        }
+        .onAppear {
+            if sentence.isPartial && analysisHasContent {
+                showAnalysis = true
+            }
+        }
     }
 
-    // MARK: - Read Mode: en/zh first, analysis collapsed
+    // MARK: - Read Mode: en → zh → [collapsible: meta → tree → tip]
     @ViewBuilder
     private var readModeContent: some View {
-        // 1. English text (large)
         englishText
-
-        // 2. Chinese translation (right after)
         chineseText
+        metaTags(analysis)
+        analysisSection
+    }
 
-        // 3. Analysis in collapsible DisclosureGroup (default collapsed)
-        if let analysis = sentence.analysis {
-            if sentence.isPartial {
-                StreamingAnalysisView(analysis: analysis, sentence: sentence)
-            } else {
-                DisclosureGroup(isExpanded: $showAnalysis) {
-                    GrammarAnalysisCard(analysis: analysis, sentence: sentence)
+    @ViewBuilder
+    private var analysisSection: some View {
+        // Analysis content (may be empty during early streaming)
+        let hasContent = !analysis.structure.isEmpty || !analysis.tense.isEmpty
+            || !analysis.chunks.isEmpty || !analysis.tip.isEmpty
+
+        if hasContent {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showAnalysis.toggle()
+                    }
                 } label: {
                     HStack(spacing: 4) {
+                        Image(systemName: showAnalysis ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
                         Text("语法分析")
                             .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundStyle(Theme.accent)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if showAnalysis {
+                    VStack(alignment: .leading, spacing: 10) {
+                        chunksTree(analysis)
+                        if !analysis.tip.isEmpty { tipBox(analysis.tip) }
+                    }
+                    .padding(.top, 4)
                 }
             }
         }
     }
 
-    // MARK: - Analyze Mode: structure first, zh after chunks
+    // MARK: - Analyze Mode: tree → en → zh → meta → tip
+    // All slots always present in VStack; empty data = empty view (no layout jump)
     @ViewBuilder
     private var analyzeModeContent: some View {
-        // 1. English text
+        chunksTree(analysis)
         englishText
-
-        // 2. Analysis section (expanded by default)
-        if let analysis = sentence.analysis {
-            if sentence.isPartial {
-                StreamingAnalysisView(analysis: analysis, sentence: sentence)
-            } else {
-                // Structure + tense summary
-                if !analysis.structure.isEmpty || !analysis.tense.isEmpty {
-                    HStack(spacing: 6) {
-                        if !analysis.structure.isEmpty {
-                            analysisMeta(label: "结构", value: analysis.structure)
-                        }
-                        if !analysis.tense.isEmpty {
-                            analysisMeta(label: "时态", value: analysis.tense)
-                        }
-                    }
-                }
-
-                // Chunks tree (always visible in analyze mode)
-                if !analysis.chunks.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(analysis.chunks.enumerated()), id: \.offset) { _, chunk in
-                            SyntaxTreeNode(chunk: chunk, depth: 0)
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Chinese translation (after analysis)
         chineseText
-
-        // 4. Tip (at the end)
-        if let analysis = sentence.analysis, !sentence.isPartial, !analysis.tip.isEmpty {
-            tipBox(analysis.tip)
-        }
+        metaTags(analysis)
+        if !analysis.tip.isEmpty { tipBox(analysis.tip) }
     }
 
     // MARK: - Shared Components
 
+    private func metaTags(_ analysis: Analysis) -> some View {
+        AnalysisMetaTags(analysis)
+    }
+
+    @ViewBuilder
+    private func chunksTree(_ analysis: Analysis) -> some View {
+        if !analysis.chunks.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(analysis.chunks.enumerated()), id: \.offset) { _, chunk in
+                    SyntaxTreeNode(chunk: chunk, depth: 0)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var englishText: some View {
         if !sentence.en.isEmpty {
-            if sentence.isPartial {
-                Text(sentence.en)
-                    .font(Theme.englishFont)
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineSpacing(6)
-                    .textSelection(.enabled)
-            } else {
-                ClickableEnglishText(text: sentence.en, onWordLookup: onWordLookup)
-                    .lineSpacing(6)
-            }
+            // Always use ClickableEnglishText — same view identity for streaming and final
+            // (avoids layout jump when isPartial changes)
+            ClickableEnglishText(text: sentence.en, onWordLookup: sentence.isPartial ? nil : onWordLookup)
+                .lineSpacing(6)
         }
     }
 
@@ -256,21 +321,6 @@ struct SentenceBlockView: View {
         }
     }
 
-    private func analysisMeta(label: String, value: String) -> some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.textSecondary.opacity(0.7))
-            Text(value)
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.textSecondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Theme.bg)
-        .cornerRadius(4)
-    }
-
     private func tipBox(_ tip: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "lightbulb.fill")
@@ -288,399 +338,327 @@ struct SentenceBlockView: View {
     }
 }
 
-// MARK: - Streaming Analysis (renders partial analysis fields as they arrive)
-struct StreamingAnalysisView: View {
-    let analysis: Analysis
-    let sentence: Sentence
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Meta tags (structure + tense) — show as soon as available
-            if !analysis.structure.isEmpty || !analysis.tense.isEmpty {
-                HStack(spacing: 6) {
-                    if !analysis.structure.isEmpty {
-                        streamingMetaTag(label: "结构", value: analysis.structure)
-                    }
-                    if !analysis.tense.isEmpty {
-                        streamingMetaTag(label: "时态", value: analysis.tense)
-                    }
-                }
-            }
-
-            // Chunks — render incrementally as they arrive
-            if !analysis.chunks.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(analysis.chunks.enumerated()), id: \.offset) { _, chunk in
-                        SyntaxTreeNode(chunk: chunk, depth: 0)
-                    }
-                }
-            }
-
-            // Tip — show as it streams in
-            if !analysis.tip.isEmpty {
-                streamingTipBox(analysis.tip)
-            }
-        }
-        .padding(12)
-        .background(Theme.tertiaryBg.opacity(0.6))
-        .cornerRadius(8)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Theme.border.opacity(0.3), lineWidth: 1)
-        )
-    }
-
-    private func streamingMetaTag(label: String, value: String) -> some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.textSecondary.opacity(0.7))
-            Text(value)
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.textSecondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Theme.bg)
-        .cornerRadius(4)
-    }
-
-    private func streamingTipBox(_ tip: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "lightbulb.fill")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.tipBorder.opacity(0.7))
-            Text(tip)
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textPrimary.opacity(0.9))
-                .lineSpacing(3)
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.tipBg.opacity(0.6))
-        .cornerRadius(6)
-    }
-}
-
-// MARK: - Clickable English Text (double-click word for lookup)
-struct ClickableEnglishText: View {
+// MARK: - Clickable English Text (hover highlight + single-click word lookup)
+struct ClickableEnglishText: NSViewRepresentable {
     let text: String
     var onWordLookup: ((String) -> Void)?
 
-    // Split text into tokens: words and separators
-    private var tokens: [(String, Bool)] {
-        // Bool = isWord
-        var result: [(String, Bool)] = []
-        var current = ""
-        var inWord = false
-
-        for ch in text {
-            let isWordChar = ch.isLetter || ch == "-" || ch == "'"
-            if isWordChar {
-                if !inWord && !current.isEmpty {
-                    result.append((current, false))
-                    current = ""
-                }
-                inWord = true
-                current.append(ch)
-            } else {
-                if inWord && !current.isEmpty {
-                    result.append((current, true))
-                    current = ""
-                }
-                inWord = false
-                current.append(ch)
-            }
-        }
-        if !current.isEmpty {
-            result.append((current, inWord))
-        }
-        return result
-    }
-
-    var body: some View {
-        // Build attributed text with individual word tap targets
-        let wordTokens = tokens
-        HStack(spacing: 0) {
-            // Use Text concatenation for proper line wrapping
-            wordTokens.reduce(Text("")) { result, token in
-                let (str, isWord) = token
-                if isWord {
-                    return result + Text(str)
-                        .font(Theme.englishFont)
-                        .foregroundColor(Theme.textPrimary)
-                } else {
-                    return result + Text(str)
-                        .font(Theme.englishFont)
-                        .foregroundColor(Theme.textPrimary)
-                }
-            }
-            .lineSpacing(6)
-        }
-        .overlay(
-            // Invisible overlay with word-level tap targets using a custom layout
-            WordTapOverlay(text: text, onWordLookup: onWordLookup)
-                .allowsHitTesting(true)
-        )
-    }
-}
-
-// Invisible overlay that provides word-level double-tap targets
-struct WordTapOverlay: NSViewRepresentable {
-    let text: String
-    var onWordLookup: ((String) -> Void)?
-
-    func makeNSView(context: Context) -> WordTapNSView {
-        let view = WordTapNSView()
-        view.text = text
-        view.onWordLookup = onWordLookup
+    func makeNSView(context: Context) -> ClickableEnglishNSView {
+        let view = ClickableEnglishNSView()
+        view.configure(text: text, font: NSFont(descriptor: Theme.englishNSFont.fontDescriptor, size: Theme.englishNSFont.pointSize)!, textColor: NSColor(Theme.textPrimary), onWordLookup: onWordLookup)
         return view
     }
 
-    func updateNSView(_ nsView: WordTapNSView, context: Context) {
-        nsView.text = text
-        nsView.onWordLookup = onWordLookup
+    func updateNSView(_ nsView: ClickableEnglishNSView, context: Context) {
+        nsView.configure(text: text, font: NSFont(descriptor: Theme.englishNSFont.fontDescriptor, size: Theme.englishNSFont.pointSize)!, textColor: NSColor(Theme.textPrimary), onWordLookup: onWordLookup)
     }
 }
 
-class WordTapNSView: NSView {
-    var text: String = ""
-    var onWordLookup: ((String) -> Void)?
+class ClickableEnglishNSView: NSView {
+    private var textStorage = NSTextStorage()
+    private var layoutManager = NSLayoutManager()
+    private var textContainer = NSTextContainer()
+    private var wordRanges: [(NSRange, String)] = []
+    private var hoveredWordIndex: Int? = nil
+    private var onWordLookup: ((String) -> Void)?
+    private var baseFont: NSFont = .systemFont(ofSize: 15)
+    private var baseTextColor: NSColor = .labelColor
+    private let accentColor = NSColor.systemBlue
+    private var trackingArea: NSTrackingArea?
 
-    override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 {
-            // Extract word at click position
-            let word = wordAtPoint(event.locationInWindow)
-            if let word = word, !word.isEmpty {
-                onWordLookup?(word)
-                return
-            }
-        }
-        super.mouseDown(with: event)
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+        textContainer.lineFragmentPadding = 0
     }
 
-    private func wordAtPoint(_ windowPoint: NSPoint) -> String? {
-        // Use NSString word-at-index to find the word under cursor
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(text: String, font: NSFont, textColor: NSColor, onWordLookup: ((String) -> Void)?) {
+        self.baseFont = font
+        self.baseTextColor = textColor
+        self.onWordLookup = onWordLookup
+
+        // Build attributed string and find word ranges
+        let attrStr = NSMutableAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: textColor
+        ])
+
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 4
+        attrStr.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: attrStr.length))
+
+        // Find English word ranges
+        wordRanges = []
         let nsText = text as NSString
-        let localPoint = convert(windowPoint, from: nil)
-
-        // Estimate character position based on view width and text length
-        let fraction = max(0, min(1, localPoint.x / max(bounds.width, 1)))
-        let charIndex = Int(fraction * CGFloat(nsText.length))
-        let safeIndex = max(0, min(charIndex, nsText.length - 1))
-
-        guard nsText.length > 0 else { return nil }
-
-        // Find word boundaries around the estimated character position
-        let range = nsText.range(of: "[a-zA-Z][a-zA-Z'-]*",
-                                  options: .regularExpression,
-                                  range: NSRange(location: 0, length: nsText.length))
-        guard range.location != NSNotFound else { return nil }
-
-        // Find all word ranges and pick the one closest to our estimated position
-        var bestWord: String?
-        var bestDistance = Int.max
-
-        var searchStart = 0
-        while searchStart < nsText.length {
-            let searchRange = NSRange(location: searchStart, length: nsText.length - searchStart)
-            let wordRange = nsText.range(of: "[a-zA-Z][a-zA-Z'-]*",
-                                          options: .regularExpression,
-                                          range: searchRange)
-            guard wordRange.location != NSNotFound else { break }
-
-            let wordMid = wordRange.location + wordRange.length / 2
-            let dist = abs(wordMid - safeIndex)
-            if dist < bestDistance {
-                bestDistance = dist
-                bestWord = nsText.substring(with: wordRange)
+        let regex = try! NSRegularExpression(pattern: "[a-zA-Z][a-zA-Z'-]*")
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+        for match in matches {
+            let word = nsText.substring(with: match.range).lowercased().replacingOccurrences(of: "[^a-z'-]", with: "", options: .regularExpression)
+            if word.count >= 2 {
+                wordRanges.append((match.range, word))
             }
-
-            searchStart = wordRange.location + wordRange.length
         }
 
-        // Only return if the click was reasonably close to the word
-        if bestDistance <= 5, let word = bestWord, word.count >= 2 {
-            return word
-        }
-        return nil
+        textStorage.setAttributedString(attrStr)
+        hoveredWordIndex = nil
+        needsDisplay = true
+        invalidateIntrinsicContentSize()
     }
 
     override var isFlipped: Bool { true }
-}
 
-// MARK: - Grammar Analysis Card
-struct GrammarAnalysisCard: View {
-    let analysis: Analysis
-    let sentence: Sentence
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            // Meta tags (structure + tense)
-            HStack(spacing: 6) {
-                metaTag(label: "结构", value: analysis.structure)
-                metaTag(label: "时态", value: analysis.tense)
-            }
-
-            // Sentence display in card
-            VStack(alignment: .leading, spacing: 4) {
-                Text(sentence.en)
-                    .font(Theme.serifFont(14))
-                    .foregroundStyle(Theme.textPrimary)
-                    .textSelection(.enabled)
-
-                Text(sentence.zh)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.textSecondary)
-                    .textSelection(.enabled)
-            }
-
-            // Syntax tree
-            if !analysis.chunks.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("句法结构")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Theme.textSecondary)
-                        .padding(.bottom, 4)
-
-                    ForEach(Array(analysis.chunks.enumerated()), id: \.offset) { _, chunk in
-                        SyntaxTreeNode(chunk: chunk, depth: 0)
-                    }
-                }
-            }
-
-            // Tip box
-            if !analysis.tip.isEmpty {
-                tipBox(analysis.tip)
-            }
-        }
-        .padding(14)
-        .background(Theme.tertiaryBg)
-        .cornerRadius(10)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Theme.border.opacity(0.5), lineWidth: 1)
-        )
+    override var intrinsicContentSize: NSSize {
+        textContainer.size = NSSize(width: bounds.width > 0 ? bounds.width : 300, height: .greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: textContainer)
+        let rect = layoutManager.usedRect(for: textContainer)
+        return NSSize(width: NSView.noIntrinsicMetric, height: ceil(rect.height))
     }
 
-    private func metaTag(label: String, value: String) -> some View {
-        HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.textSecondary.opacity(0.7))
-            Text(value)
-                .font(.system(size: 10))
-                .foregroundStyle(Theme.textSecondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(Theme.bg)
-        .cornerRadius(4)
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(Theme.border.opacity(0.3), lineWidth: 0.5)
-        )
+    override func layout() {
+        super.layout()
+        textContainer.size = NSSize(width: bounds.width, height: .greatestFiniteMagnitude)
+        layoutManager.ensureLayout(for: textContainer)
+        invalidateIntrinsicContentSize()
     }
 
-    private func tipBox(_ tip: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "lightbulb.fill")
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.tipBorder)
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea { removeTrackingArea(existing) }
+        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp], owner: self)
+        addTrackingArea(trackingArea!)
+    }
 
-            Text(tip)
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.textPrimary)
-                .lineSpacing(3)
+    override func draw(_ dirtyRect: NSRect) {
+        // Draw hover highlight background
+        if let idx = hoveredWordIndex {
+            let range = wordRanges[idx].0
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            layoutManager.enumerateEnclosingRects(forGlyphRange: glyphRange, withinSelectedGlyphRange: NSRange(location: NSNotFound, length: 0), in: textContainer) { rect, _ in
+                let bgRect = rect.insetBy(dx: -2, dy: -1)
+                self.accentColor.setFill()
+                NSBezierPath(roundedRect: bgRect, xRadius: 3, yRadius: 3).fill()
+            }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.tipBg)
-        .cornerRadius(8)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Theme.tipBorder.opacity(0.4), lineWidth: 1)
-        )
+
+        // Draw text
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        layoutManager.drawGlyphs(forGlyphRange: glyphRange, at: .zero)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let newIndex = wordIndex(at: point)
+
+        if newIndex != hoveredWordIndex {
+            // Reset previous highlight
+            if let old = hoveredWordIndex {
+                let range = wordRanges[old].0
+                textStorage.addAttribute(.foregroundColor, value: baseTextColor, range: range)
+            }
+            // Set new highlight
+            if let new = newIndex {
+                let range = wordRanges[new].0
+                textStorage.addAttribute(.foregroundColor, value: NSColor.white, range: range)
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+            hoveredWordIndex = newIndex
+            needsDisplay = true
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if let old = hoveredWordIndex {
+            let range = wordRanges[old].0
+            textStorage.addAttribute(.foregroundColor, value: baseTextColor, range: range)
+            hoveredWordIndex = nil
+            needsDisplay = true
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let idx = wordIndex(at: point) {
+            let word = wordRanges[idx].1
+            onWordLookup?(word)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    private func wordIndex(at point: NSPoint) -> Int? {
+        let charIndex = layoutManager.characterIndex(for: point, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
+        for (i, (range, _)) in wordRanges.enumerated() {
+            if NSLocationInRange(charIndex, range) { return i }
+        }
+        return nil
     }
 }
+
 
 // MARK: - Syntax Tree Node (Recursive)
+// Mirrors the Python version's ga-node (leaf) / ga-branch (has children) design:
+// - Branch expanded: [▼ role] → indented children with colored left border
+// - Branch collapsed: [▶ role en zh] (summary)
+// - Leaf: [role en zh] inline
 struct SyntaxTreeNode: View {
     let chunk: Chunk
     let depth: Int
     @State private var expanded = true
+    @State private var isHovered = false
 
     private var hasChildren: Bool {
-        if let children = chunk.children, !children.isEmpty {
-            return true
-        }
-        return false
+        chunk.children != nil && !chunk.children!.isEmpty
     }
+
+    private var roleColor: Color { Theme.roleColor(chunk.role) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // This node
-            HStack(alignment: .top, spacing: 0) {
-                // Left colored border
-                if depth > 0 {
-                    Rectangle()
-                        .fill(Theme.roleColor(chunk.role))
-                        .frame(width: 2)
-                        .padding(.leading, CGFloat(depth - 1) * 16)
-                }
-
-                // Node content
-                HStack(alignment: .top, spacing: 6) {
-                    // Expand/collapse toggle
-                    if hasChildren {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                expanded.toggle()
-                            }
-                        } label: {
-                            Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(Theme.textSecondary)
-                                .frame(width: 12, height: 12)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Spacer()
-                            .frame(width: 12)
-                    }
-
-                    // Role tag
-                    Text(chunk.role)
-                        .font(.system(size: depth == 0 ? 11 : 10, weight: depth == 0 ? .semibold : .medium))
-                        .foregroundStyle(Theme.roleColor(chunk.role))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Theme.roleColorBg(chunk.role))
-                        .cornerRadius(3)
-
-                    // Text content
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(chunk.en)
-                            .font(.system(size: depth == 0 ? 13 : 12))
-                            .foregroundStyle(Theme.textPrimary)
-                            .textSelection(.enabled)
-
-                        Text(chunk.zh)
-                            .font(.system(size: depth == 0 ? 12 : 11))
-                            .foregroundStyle(Theme.textSecondary)
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(.leading, depth > 0 ? 8 : 0)
-                .padding(.vertical, depth == 0 ? 6 : 4)
+            if hasChildren {
+                branchView
+            } else {
+                leafView
             }
+        }
+    }
 
-            // Children (if expanded)
-            if hasChildren && expanded {
-                ForEach(Array(chunk.children!.enumerated()), id: \.offset) { _, child in
-                    SyntaxTreeNode(chunk: child, depth: depth + 1)
+    // MARK: - Leaf node: [role] en zh
+    private var leafView: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            // Spacer to align with branch toggle
+            Spacer().frame(width: 12)
+
+            roleTag
+
+            textContent
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 2)
+        .background(isHovered ? Theme.textSecondary.opacity(0.04) : Color.clear)
+        .cornerRadius(3)
+        .onHover { isHovered = $0 }
+    }
+
+    // MARK: - Branch node: toggle header + indented children
+    private var branchView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header row (clickable)
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    expanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    // Toggle indicator
+                    Text(expanded ? "▼" : "▶")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.textSecondary.opacity(0.35))
+                        .frame(width: 12, alignment: .center)
+
+                    roleTag
+
+                    // Show en/zh as summary when collapsed
+                    if !expanded {
+                        textContent
+                    }
+                }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .background(isHovered ? Theme.textSecondary.opacity(0.06) : Color.clear)
+                .cornerRadius(3)
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+
+            // Children with indented left border
+            if expanded {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(chunk.children!.enumerated()), id: \.offset) { _, child in
+                        SyntaxTreeNode(chunk: child, depth: depth + 1)
+                    }
+                }
+                .padding(.leading, 18)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(depth == 0 ? roleColor.opacity(0.4) : Theme.textSecondary.opacity(0.1))
+                        .frame(width: 1.5)
+                        .padding(.leading, 5) // align with child toggle center
                 }
             }
         }
+    }
+
+    // MARK: - Shared components
+
+    private var roleTag: some View {
+        Group {
+            if depth == 0 {
+                Text(chunk.role)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(roleColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(roleColor.opacity(0.15))
+                    .cornerRadius(3)
+            } else {
+                Text(chunk.role)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .fixedSize()
+    }
+
+    /// Recursively collect all leaf `en` text from a chunk tree
+    private static func collectEn(_ chunk: Chunk) -> String {
+        if let children = chunk.children, !children.isEmpty {
+            return children.map { collectEn($0) }.joined(separator: " ")
+        }
+        return chunk.en
+    }
+
+    /// Recursively collect all leaf `zh` text from a chunk tree
+    private static func collectZh(_ chunk: Chunk) -> String {
+        if let children = chunk.children, !children.isEmpty {
+            return children.map { collectZh($0) }.joined()
+        }
+        return chunk.zh
+    }
+
+    private var displayEn: String {
+        chunk.en.isEmpty && hasChildren ? Self.collectEn(chunk) : chunk.en
+    }
+
+    private var displayZh: String {
+        chunk.zh.isEmpty && hasChildren ? Self.collectZh(chunk) : chunk.zh
+    }
+
+    private var textContent: some View {
+        // en and zh inline on the same line, wrapping naturally
+        let enText = !displayEn.isEmpty
+            ? Text(displayEn)
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textPrimary)
+            : Text("")
+        let zhText = !displayZh.isEmpty
+            ? Text("  " + displayZh)
+                .font(.system(size: 12))
+                .foregroundColor(Theme.textSecondary)
+            : Text("")
+
+        return (enText + zhText)
+            .lineSpacing(4)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
     }
 }

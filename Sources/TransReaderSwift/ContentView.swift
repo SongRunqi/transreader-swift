@@ -27,12 +27,6 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header bar
-            headerBar
-
-            Divider()
-                .foregroundColor(Theme.border)
-
             // Update progress banner
             if let stage = appState.updateStage {
                 UpdateProgressView(
@@ -92,14 +86,30 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.bg)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 0) {
+                    ForEach(Tab.allCases, id: \.self) { tab in
+                        tabButton(tab)
+                    }
+                }
+                .padding(.horizontal, 4)
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                toolbarActions
+            }
+        }
         .onChange(of: showSettings) { _, newValue in
             if newValue {
                 selectedTab = .settings
             }
         }
-        // Word lookup popover
-        .sheet(isPresented: $appState.showWordPopover) {
-            wordLookupSheet
+        .overlay {
+            if appState.showWordPopover {
+                wordLookupOverlay
+            }
         }
         // Long text confirmation
         .alert("长文本确认", isPresented: $appState.showLongTextConfirm) {
@@ -116,190 +126,179 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Word Lookup Sheet
+    // MARK: - Word Lookup Overlay
     @ViewBuilder
-    private var wordLookupSheet: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("查词")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                Spacer()
-                Button {
-                    appState.showWordPopover = false
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(Theme.textSecondary)
+    private var wordLookupOverlay: some View {
+        ZStack {
+            // Dimmed backdrop
+            Color.black.opacity(0.3)
+                .ignoresSafeArea()
+                .onTapGesture { appState.showWordPopover = false }
+
+            VStack(spacing: 0) {
+                HStack {
+                    Text("查词")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Button {
+                        appState.showWordPopover = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
                 }
-                .buttonStyle(.plain)
-                .focusable(false)
+                .padding(16)
+
+                Divider()
+
+                if appState.isLookingUpWord {
+                    VStack {
+                        ProgressView()
+                        Text("查询中...")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let entry = appState.currentWordLookup {
+                    WordLookupView(entry: entry, dictionaryService: appState.dictionaryService) {
+                        appState.addWordToVocab(entry)
+                    }
+                }
             }
+            .frame(maxWidth: 400, maxHeight: 500)
+            .background(Theme.bg)
+            .cornerRadius(10)
+            .shadow(color: .black.opacity(0.2), radius: 20)
             .padding(16)
-
-            Divider()
-
-            if appState.isLookingUpWord {
-                VStack {
-                    ProgressView()
-                    Text("查询中...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let entry = appState.currentWordLookup {
-                WordLookupView(entry: entry, dictionaryService: appState.dictionaryService) {
-                    appState.addWordToVocab(entry)
-                }
-            }
         }
-        .frame(width: 400, height: 500)
-        .background(Theme.bg)
     }
 
-    // MARK: - Header Bar
-    private var headerBar: some View {
-        HStack(spacing: 0) {
-            // Tabs
-            HStack(spacing: 2) {
-                ForEach(Tab.allCases, id: \.self) { tab in
-                    tabButton(tab)
-                }
-            }
-            .padding(.leading, 16)
+    // MARK: - Toolbar Actions
+    @ViewBuilder
+    private var toolbarActions: some View {
+        // Queue indicator with task count
+        if appState.isTranslating || !appState.translationQueue.isEmpty {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
 
-            Spacer()
-
-            // Action buttons
-            HStack(spacing: 12) {
-                // Queue indicator with task count
-                if appState.isTranslating || !appState.translationQueue.isEmpty {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-
-                        let runningCount = appState.translationQueue.filter { $0.status == .running }.count
-                        let queuedCount = appState.translationQueue.filter { $0.status == .queued }.count
-                        if runningCount + queuedCount > 0 {
-                            Text("\(runningCount)/\(runningCount + queuedCount)")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(Theme.textSecondary)
-                                .help("执行中/总计")
-                        }
-
-                        Button {
-                            appState.cancelAllTasks()
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(Theme.textSecondary)
-                        }
-                        .buttonStyle(.plain)
-                        .focusable(false)
-                        .help("取消全部")
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Theme.tertiaryBg)
-                    .cornerRadius(6)
+                let runningCount = appState.translationQueue.filter { $0.status == .running }.count
+                let queuedCount = appState.translationQueue.filter { $0.status == .queued }.count
+                if runningCount + queuedCount > 0 {
+                    Text("\(runningCount)/\(runningCount + queuedCount)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.textSecondary)
+                        .help("执行中/总计")
                 }
 
-                // Writing assistance indicator
-                if appState.isEnhancing {
-                    HStack(spacing: 5) {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text(appState.enhanceProgress)
-                            .font(.system(size: 10))
-                            .foregroundStyle(Theme.textSecondary)
-                        Button {
-                            appState.cancelEnhance()
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(Theme.textSecondary)
-                        }
-                        .buttonStyle(.plain)
-                        .focusable(false)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Theme.tertiaryBg)
-                    .cornerRadius(5)
-                }
-
-                // Display mode toggle
                 Button {
-                    appState.toggleDisplayMode()
+                    appState.cancelAllTasks()
                 } label: {
-                    Image(systemName: appState.configStore.config.displayMode == .read ? "book.fill" : "text.magnifyingglass")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Theme.accent)
-                }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .help(appState.configStore.config.displayMode == .read ? "阅读模式（点击切换分析模式）" : "分析模式（点击切换阅读模式）")
-
-                // Monitor toggle
-                Button {
-                    appState.toggleMonitor()
-                } label: {
-                    Image(systemName: appState.monitorEnabled ? "eye.fill" : "eye.slash")
-                        .font(.system(size: 14))
-                        .foregroundStyle(appState.monitorEnabled ? Theme.accent : Theme.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .help(appState.monitorEnabled ? "划词监控: 开" : "划词监控: 关")
-
-                // OCR capture
-                Button {
-                    appState.onCaptureTranslate?()
-                } label: {
-                    Image(systemName: "camera.viewfinder")
-                        .font(.system(size: 14))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(Theme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
-                .help("截取翻译 (⌥⌘T)")
+                .help("取消全部")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Theme.tertiaryBg)
+            .cornerRadius(6)
+        }
 
-                // Pin toggle
+        // Writing assistance indicator
+        if appState.isEnhancing {
+            HStack(spacing: 5) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text(appState.enhanceProgress)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textSecondary)
                 Button {
-                    appState.onTogglePin?()
+                    appState.cancelEnhance()
                 } label: {
-                    Image(systemName: appState.windowPinned ? "pin.fill" : "pin")
-                        .font(.system(size: 14))
-                        .foregroundStyle(appState.windowPinned ? Theme.accent : Theme.textSecondary)
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(Theme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
-                .help("窗口置顶")
             }
-            .padding(.trailing, 16)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Theme.tertiaryBg)
+            .cornerRadius(5)
         }
-        .frame(height: 44)
-        .background(.ultraThinMaterial)
+
+        // Monitor toggle
+        Button {
+            appState.toggleMonitor()
+        } label: {
+            Image(systemName: appState.monitorEnabled ? "eye.fill" : "eye.slash")
+        }
+        .help(appState.monitorEnabled ? "划词监控: 开" : "划词监控: 关")
+
+        // Pin toggle
+        Button {
+            appState.onTogglePin?()
+        } label: {
+            Image(systemName: appState.windowPinned ? "pin.fill" : "pin")
+        }
+        .help("窗口置顶")
+
+        // More actions menu
+        Menu {
+            Button {
+                appState.toggleDisplayMode()
+            } label: {
+                Label(
+                    appState.configStore.config.displayMode == .read ? "切换分析模式" : "切换阅读模式",
+                    systemImage: appState.configStore.config.displayMode == .read ? "text.magnifyingglass" : "book.fill"
+                )
+            }
+            Button {
+                appState.onCaptureTranslate?()
+            } label: {
+                Label("截取翻译 (⌥⌘T)", systemImage: "camera.viewfinder")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
     }
 
     private func tabButton(_ tab: Tab) -> some View {
-        Button {
+        TabButton(tab: tab, isSelected: selectedTab == tab) {
             selectedTab = tab
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: tab.icon)
-                    .font(.system(size: 12))
-                Text(tab.rawValue)
-                    .font(.system(size: 13, weight: selectedTab == tab ? .semibold : .regular))
-            }
-            .foregroundStyle(selectedTab == tab ? Theme.accent : Theme.textSecondary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(selectedTab == tab ? Theme.accent.opacity(0.1) : Color.clear)
-            .cornerRadius(6)
         }
-        .buttonStyle(.plain)
-        .focusable(false)
+    }
+
+    // Separate view struct so @State (hover) is per-tab
+    private struct TabButton: View {
+        let tab: Tab
+        let isSelected: Bool
+        let action: () -> Void
+        @State private var isHovered = false
+
+        var body: some View {
+            Button(action: action) {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isSelected ? Theme.accent : isHovered ? Theme.textPrimary : Theme.textSecondary)
+                    .frame(width: 32, height: 28)
+                    .background(isSelected ? Theme.accent.opacity(0.12) : isHovered ? Theme.textSecondary.opacity(0.1) : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .onHover { isHovered = $0 }
+            .help(tab.rawValue)
+        }
     }
 }
 
@@ -320,9 +319,8 @@ struct TranslationResultsView: View {
                                 .padding(.bottom, 8)
                         }
 
-                        // Current translating block (if not yet in history)
-                        if let current = appState.currentTranslation,
-                           !appState.translationHistory.contains(where: { $0.timestamp == current.timestamp }) {
+                        // Current translation block — persists until a new translation starts
+                        if let current = appState.currentTranslation {
                             TranslationBlockView(
                                 result: current,
                                 isActive: appState.isTranslating,
@@ -330,13 +328,11 @@ struct TranslationResultsView: View {
                                 onRetranslate: { text in appState.retranslate(text) },
                                 onWordLookup: { word in appState.lookupWord(word) },
                                 onCancel: appState.isTranslating ? {
-                                    // Find the running task that matches this translation
                                     if let task = appState.translationQueue.first(where: {
                                         $0.status == .running && $0.text == current.sourceText
                                     }) {
                                         appState.cancelTask(id: task.id)
                                     } else {
-                                        // Fallback: cancel all if we can't identify the specific task
                                         appState.cancelAllTasks()
                                     }
                                 } : nil
@@ -344,11 +340,11 @@ struct TranslationResultsView: View {
                             .id("current")
                         }
 
-                        // History blocks
-                        ForEach(appState.translationHistory, id: \.timestamp) { result in
+                        // History blocks — skip the one shown as current
+                        ForEach(appState.translationHistory.filter { $0.timestamp != appState.currentTranslation?.timestamp }, id: \.timestamp) { result in
                             TranslationBlockView(
                                 result: result,
-                                isActive: appState.currentTranslation?.timestamp == result.timestamp,
+                                isActive: false,
                                 displayMode: appState.configStore.config.displayMode,
                                 onRetranslate: { text in appState.retranslate(text) },
                                 onWordLookup: { word in appState.lookupWord(word) }

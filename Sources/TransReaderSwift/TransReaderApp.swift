@@ -3,6 +3,7 @@ import AppKit
 
 @main
 struct TransReaderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var appState = AppState()
     @State private var showSettings = false
     @Environment(\.openWindow) private var openWindow
@@ -24,16 +25,12 @@ struct TransReaderApp: App {
     var body: some Scene {
         MenuBarExtra(menuBarTitle) {
             MenuBarView(appState: appState, showSettings: $showSettings)
-                .onAppear {
-                    // Open main window on first launch
-                    openWindow(id: "main")
-                }
         }
         .menuBarExtraStyle(.menu)
 
         Window("TransReader", id: "main") {
             ContentView(appState: appState, showSettings: $showSettings)
-                .frame(minWidth: 480, minHeight: 400)
+                .frame(minWidth: 200, minHeight: 200)
                 .translationErrorAlert(appState: appState)
                 .translocationAlert(appState: appState)
                 .onAppear {
@@ -50,6 +47,7 @@ struct TransReaderApp: App {
         }
         .defaultSize(width: 900, height: 700)
         .windowResizability(.contentSize)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
@@ -103,10 +101,11 @@ struct TransReaderApp: App {
         }
 
         appState.onShowWindowNoActivate = { [openWindow] in
-            // Fallback path: if the window doesn't exist yet, create it via SwiftUI
             openWindow(id: "main")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                appState.showWindowWithoutActivation()
+                if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
+                    window.orderFrontRegardless()
+                }
             }
         }
     }
@@ -200,5 +199,29 @@ struct MenuBarView: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q", modifiers: .command)
+    }
+}
+
+// MARK: - App Delegate (opens main window on launch)
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Ensure main window opens on launch
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Click Dock icon → show window
+        if !flag {
+            if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        return true
     }
 }

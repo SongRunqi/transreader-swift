@@ -331,9 +331,18 @@ actor SelectionMonitor {
             return nil
         }
 
-        // Skip one cycle after app switch to avoid stale selection
+        // After app switch: snapshot current selection as baseline so we don't
+        // translate text that was already selected before the switch
         if appJustSwitched {
             appJustSwitched = false
+            // Read current selection and store as firedText (baseline)
+            if let sel = getAXSelectedText(from: focusedAppEl) {
+                let trimmed = sel.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    firedText = trimmed
+                    appLog("[Monitor] Baseline selection on app switch: \(trimmed.prefix(40))...")
+                }
+            }
             return nil
         }
 

@@ -32,14 +32,13 @@ final class TranslationStore: @unchecked Sendable {
         let translationsSQL = """
         CREATE TABLE IF NOT EXISTS translations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
+            timestamp REAL NOT NULL,
             source_text TEXT NOT NULL,
             sentences TEXT NOT NULL,
-            source TEXT NOT NULL DEFAULT 'manual',
             source_app TEXT DEFAULT '',
             source_url TEXT DEFAULT '',
             elapsed_ms INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
         );
         """
 
@@ -74,8 +73,8 @@ final class TranslationStore: @unchecked Sendable {
             guard let self = self, let db = self.db else { return }
 
             let sql = """
-            INSERT INTO translations (timestamp, source_text, sentences, source, source_app, source_url, elapsed_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO translations (timestamp, source_text, sentences, source_app, source_url, elapsed_ms)
+            VALUES (?, ?, ?, ?, ?, ?);
             """
 
             var stmt: OpaquePointer?
@@ -86,15 +85,20 @@ final class TranslationStore: @unchecked Sendable {
             let encoder = JSONEncoder()
             let sentencesJSON = (try? encoder.encode(result.sentences)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
 
-            sqlite3_bind_text(stmt, 1, (ts as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 2, (result.sourceText as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 3, (sentencesJSON as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 4, (result.source.rawValue as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 5, (sourceApp as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 6, (sourceUrl as NSString).utf8String, -1, nil)
-            sqlite3_bind_int(stmt, 7, Int32(result.elapsedMs))
+            sqlite3_bind_text(stmt, 1, (ts as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 2, (result.sourceText as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 3, (sentencesJSON as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 4, (sourceApp as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 5, (sourceUrl as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_int(stmt, 6, Int32(result.elapsedMs))
 
-            sqlite3_step(stmt)
+            let rc = sqlite3_step(stmt)
+            if rc != SQLITE_DONE {
+                let err = String(cString: sqlite3_errmsg(db))
+                appLog("[DB] Save translation failed: \(err) (rc=\(rc))")
+            } else {
+                appLog("[DB] Saved translation: \(result.sentences.count) sentences, \(sentencesJSON.count) bytes")
+            }
         }
     }
 
@@ -117,11 +121,11 @@ final class TranslationStore: @unchecked Sendable {
             let encoder = JSONEncoder()
             let resultJSON = (try? encoder.encode(result)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
-            sqlite3_bind_text(stmt, 1, (ts as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 2, (word as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 3, (resultJSON as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 4, (sourceApp as NSString).utf8String, -1, nil)
-            sqlite3_bind_text(stmt, 5, (sourceUrl as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 1, (ts as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 2, (word as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 3, (resultJSON as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 4, (sourceApp as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_text(stmt, 5, (sourceUrl as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
 
             sqlite3_step(stmt)
         }
@@ -141,12 +145,9 @@ final class TranslationStore: @unchecked Sendable {
             guard let self = self, let db = self.db else { return }
 
             let sql = """
-            SELECT date(t.timestamp) as d, COUNT(DISTINCT t.id) as tc, 0 as lc
-            FROM translations t
-            GROUP BY d
-            UNION ALL
-            SELECT date(w.timestamp) as d, 0 as tc, COUNT(DISTINCT w.id) as lc
-            FROM word_lookups w
+            SELECT date(created_at) as d,
+                   SUM(json_array_length(sentences)) as cnt
+            FROM translations
             GROUP BY d
             ORDER BY d DESC
             LIMIT ?;
@@ -157,18 +158,12 @@ final class TranslationStore: @unchecked Sendable {
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_int(stmt, 1, Int32(limit))
 
-            var dateMap: [String: (Int, Int)] = [:]
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let date = columnText(stmt, 0)
                 guard !date.isEmpty else { continue }
-                let tc = Int(sqlite3_column_int(stmt, 1))
-                let lc = Int(sqlite3_column_int(stmt, 2))
-                let existing = dateMap[date] ?? (0, 0)
-                dateMap[date] = (existing.0 + tc, existing.1 + lc)
+                let count = Int(sqlite3_column_int(stmt, 1))
+                results.append(ReadingDate(date: date, translationCount: count, lookupCount: 0))
             }
-
-            results = dateMap.map { ReadingDate(date: $0.key, translationCount: $0.value.0, lookupCount: $0.value.1) }
-                .sorted { $0.date > $1.date }
         }
         return results
     }
@@ -189,7 +184,7 @@ final class TranslationStore: @unchecked Sendable {
             let sql = """
             SELECT source_app, source_url, COUNT(*) as cnt
             FROM translations
-            WHERE date(timestamp) = ?
+            WHERE date(created_at) = ?
             GROUP BY source_app, source_url
             ORDER BY cnt DESC;
             """
@@ -197,7 +192,7 @@ final class TranslationStore: @unchecked Sendable {
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
             defer { sqlite3_finalize(stmt) }
-            sqlite3_bind_text(stmt, 1, (date as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 1, (date as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
 
             while sqlite3_step(stmt) == SQLITE_ROW {
                 let app = columnText(stmt, 0)
@@ -211,15 +206,15 @@ final class TranslationStore: @unchecked Sendable {
 
     // MARK: - Query Translations for a date
 
-    func getTranslations(date: String, query: String? = nil, sourceApp: String? = nil) -> [SavedTranslation] {
+    func getTranslations(date: String, query: String? = nil, sourceApp: String? = nil, sourceUrl: String? = nil) -> [SavedTranslation] {
         var results: [SavedTranslation] = []
         queue.sync { [weak self] in
             guard let self = self, let db = self.db else { return }
 
             var sql = """
-            SELECT timestamp, source_text, sentences, source, source_app, source_url, elapsed_ms
+            SELECT timestamp, source_text, sentences, 'manual', source_app, source_url, elapsed_ms
             FROM translations
-            WHERE date(timestamp) = ?
+            WHERE date(created_at) = ?
             """
             var bindValues: [String] = [date]
 
@@ -233,6 +228,10 @@ final class TranslationStore: @unchecked Sendable {
                 sql += " AND source_app = ?"
                 bindValues.append(app)
             }
+            if let url = sourceUrl, !url.isEmpty {
+                sql += " AND source_url = ?"
+                bindValues.append(url)
+            }
 
             sql += " ORDER BY timestamp DESC;"
 
@@ -240,7 +239,7 @@ final class TranslationStore: @unchecked Sendable {
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
             defer { sqlite3_finalize(stmt) }
             for (i, val) in bindValues.enumerated() {
-                sqlite3_bind_text(stmt, Int32(i + 1), (val as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(stmt, Int32(i + 1), (val as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
             }
 
             results = self.parseTranslationRows(stmt)
@@ -256,7 +255,7 @@ final class TranslationStore: @unchecked Sendable {
             guard let self = self, let db = self.db else { return }
 
             var sql = """
-            SELECT timestamp, source_text, sentences, source, source_app, source_url, elapsed_ms
+            SELECT timestamp, source_text, sentences, 'manual', source_app, source_url, elapsed_ms
             FROM translations WHERE 1=1
             """
             var bindValues: [String] = []
@@ -282,7 +281,7 @@ final class TranslationStore: @unchecked Sendable {
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
             defer { sqlite3_finalize(stmt) }
             for (i, val) in bindValues.enumerated() {
-                sqlite3_bind_text(stmt, Int32(i + 1), (val as NSString).utf8String, -1, nil)
+                sqlite3_bind_text(stmt, Int32(i + 1), (val as NSString).utf8String, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
             }
             sqlite3_bind_int(stmt, Int32(bindValues.count + 1), Int32(limit))
 
@@ -323,7 +322,13 @@ final class TranslationStore: @unchecked Sendable {
             let elapsed = Int(sqlite3_column_int(stmt, 6))
 
             let sentences = (try? decoder.decode([Sentence].self, from: Data(sentencesJSON.utf8))) ?? []
-            let timestamp = ISO8601DateFormatter().date(from: ts) ?? Date()
+            // Support both ISO8601 ("2026-04-02T09:59:20Z") and Unix timestamp ("1775095154.38165")
+            let timestamp: Date
+            if let unixTime = Double(ts) {
+                timestamp = Date(timeIntervalSince1970: unixTime)
+            } else {
+                timestamp = ISO8601DateFormatter().date(from: ts) ?? Date()
+            }
 
             results.append(SavedTranslation(
                 timestamp: timestamp,
@@ -377,9 +382,9 @@ final class TranslationStore: @unchecked Sendable {
             // Translation counts
             let sql1 = """
             SELECT
-                COALESCE(SUM(CASE WHEN date(timestamp) = date('now') THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN date(timestamp) >= date('now', '-7 days') THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN date(timestamp) >= date('now', '-30 days') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN date(created_at) = date('now') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN date(created_at) >= date('now', '-7 days') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN date(created_at) >= date('now', '-30 days') THEN 1 ELSE 0 END), 0),
                 COUNT(*)
             FROM translations;
             """
@@ -397,9 +402,9 @@ final class TranslationStore: @unchecked Sendable {
             // Lookup counts
             let sql2 = """
             SELECT
-                COALESCE(SUM(CASE WHEN date(timestamp) = date('now') THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN date(timestamp) >= date('now', '-7 days') THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN date(timestamp) >= date('now', '-30 days') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN date(created_at) = date('now') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN date(created_at) >= date('now', '-7 days') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN date(created_at) >= date('now', '-30 days') THEN 1 ELSE 0 END), 0),
                 COUNT(*)
             FROM word_lookups;
             """
@@ -416,7 +421,7 @@ final class TranslationStore: @unchecked Sendable {
             // Active apps (last 30 days)
             let sql3 = """
             SELECT DISTINCT source_app FROM translations
-            WHERE date(timestamp) >= date('now', '-30 days') AND source_app != ''
+            WHERE date(created_at) >= date('now', '-30 days') AND source_app != ''
             ORDER BY source_app;
             """
             if sqlite3_prepare_v2(db, sql3, -1, &stmt, nil) == SQLITE_OK {
@@ -429,7 +434,7 @@ final class TranslationStore: @unchecked Sendable {
             // Top URLs (last 30 days, top 5)
             let sql4 = """
             SELECT source_url, COUNT(*) as cnt FROM translations
-            WHERE date(timestamp) >= date('now', '-30 days') AND source_url != ''
+            WHERE date(created_at) >= date('now', '-30 days') AND source_url != ''
             GROUP BY source_url ORDER BY cnt DESC LIMIT 5;
             """
             if sqlite3_prepare_v2(db, sql4, -1, &stmt, nil) == SQLITE_OK {

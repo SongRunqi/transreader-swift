@@ -11,6 +11,7 @@ struct ReadingView: View {
     // Search & filter state
     @State private var searchQuery: String = ""
     @State private var filterApp: String?
+    @State private var filterUrl: String?
     @State private var searchResults: [SavedTranslation] = []
     @State private var searchTask: Task<Void, Never>?
 
@@ -51,6 +52,7 @@ struct ReadingView: View {
             if newValue.isEmpty {
                 searchResults = []
                 filterApp = nil
+                filterUrl = nil
                 return
             }
             searchTask = Task {
@@ -66,23 +68,10 @@ struct ReadingView: View {
             }
         }
         .onChange(of: filterApp) { _, _ in
-            if isSearchMode {
-                // Re-search with new filter
-                let query = searchQuery
-                searchTask?.cancel()
-                searchTask = Task {
-                    let results = translationStore.searchTranslations(
-                        query: query,
-                        sourceApp: filterApp
-                    )
-                    await MainActor.run {
-                        searchResults = results
-                    }
-                }
-            } else if let date = selectedDate {
-                // Filter within current date
-                loadTranslations(date: date)
-            }
+            if let date = selectedDate { loadTranslations(date: date) }
+        }
+        .onChange(of: filterUrl) { _, _ in
+            if let date = selectedDate { loadTranslations(date: date) }
         }
     }
 
@@ -179,37 +168,17 @@ struct ReadingView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(readingDates, id: \.date) { dateEntry in
-                        Button {
+                        DateRowButton(
+                            dateEntry: dateEntry,
+                            isSelected: selectedDate == dateEntry.date,
+                            displayText: formatDateDisplay(dateEntry.date)
+                        ) {
                             selectedDate = dateEntry.date
+                            filterApp = nil
+                            filterUrl = nil
                             loadGroups(date: dateEntry.date)
                             loadTranslations(date: dateEntry.date)
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(formatDateDisplay(dateEntry.date))
-                                        .font(.system(size: 13, weight: selectedDate == dateEntry.date ? .semibold : .regular))
-                                        .foregroundStyle(selectedDate == dateEntry.date ? Theme.accent : Theme.textPrimary)
-
-                                    HStack(spacing: 8) {
-                                        if dateEntry.translationCount > 0 {
-                                            Text("\(dateEntry.translationCount) 翻译")
-                                                .font(.system(size: 10))
-                                                .foregroundStyle(Theme.textSecondary)
-                                        }
-                                        if dateEntry.lookupCount > 0 {
-                                            Text("\(dateEntry.lookupCount) 查词")
-                                                .font(.system(size: 10))
-                                                .foregroundStyle(Theme.textSecondary)
-                                        }
-                                    }
-                                }
-                                Spacer()
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(selectedDate == dateEntry.date ? Theme.accent.opacity(0.08) : Color.clear)
                         }
-                        .buttonStyle(.plain)
 
                         Divider()
                             .padding(.leading, 16)
@@ -245,12 +214,22 @@ struct ReadingView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(searchResults, id: \.timestamp) { saved in
-                            savedTranslationCard(saved)
+                    let items = searchResults.flatMap { saved in
+                        saved.sentences.enumerated().map { (i, sentence) in
+                            ReadingItem(
+                                id: "\(saved.timestamp.timeIntervalSince1970)_\(i)",
+                                sentence: sentence,
+                                timestamp: saved.timestamp
+                            )
                         }
                     }
-                    .padding(16)
+                    LazyVStack(spacing: 0) {
+                        ForEach(items, id: \.id) { item in
+                            readingItemView(item)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
                 }
             }
         }
@@ -270,15 +249,27 @@ struct ReadingView: View {
                     FlowLayout(spacing: 8) {
                         ForEach(groups, id: \.self) { group in
                             let appName = group.sourceApp.isEmpty ? "未知" : group.sourceApp
-                            let isFiltered = filterApp == group.sourceApp
+                            let domain = extractDomain(group.sourceUrl)
+                            let isFiltered = filterApp == group.sourceApp && filterUrl == group.sourceUrl
 
                             Button {
-                                filterApp = isFiltered ? nil : group.sourceApp
+                                if isFiltered {
+                                    filterApp = nil
+                                    filterUrl = nil
+                                } else {
+                                    filterApp = group.sourceApp
+                                    filterUrl = group.sourceUrl
+                                }
                             } label: {
                                 HStack(spacing: 4) {
                                     Text(appName)
                                         .font(.system(size: 11))
                                         .foregroundStyle(isFiltered ? .white : Theme.textPrimary)
+                                    if !domain.isEmpty {
+                                        Text(domain)
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(isFiltered ? .white.opacity(0.7) : Theme.textSecondary)
+                                    }
                                     Text("×\(group.count)")
                                         .font(.system(size: 10, weight: .medium))
                                         .foregroundStyle(isFiltered ? .white.opacity(0.8) : Theme.accent)
@@ -297,64 +288,85 @@ struct ReadingView: View {
                 Divider()
             }
 
-            // Translations
+            // Translations (per-sentence items)
             ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(translations, id: \.timestamp) { saved in
-                        savedTranslationCard(saved)
+                LazyVStack(spacing: 0) {
+                    ForEach(allSentenceItems, id: \.id) { item in
+                        readingItemView(item)
                     }
                 }
-                .padding(16)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
             }
         }
     }
 
-    private func savedTranslationCard(_ saved: SavedTranslation) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(formatTime(saved.timestamp))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Theme.textSecondary)
+    // Flatten translations into per-sentence items with unique ids
+    private struct ReadingItem: Identifiable {
+        let id: String  // "timestamp_sentenceIndex"
+        let sentence: Sentence
+        let timestamp: Date
+    }
 
-                if saved.elapsedMs > 0 {
-                    Text("(\(String(format: "%.1fs", Double(saved.elapsedMs) / 1000.0)))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(Theme.textSecondary.opacity(0.7))
-                }
-
-                Spacer()
-
-                if !saved.sourceApp.isEmpty {
-                    Text(saved.sourceApp)
-                        .font(.system(size: 10))
-                        .foregroundStyle(Theme.textSecondary.opacity(0.5))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Theme.tertiaryBg)
-                        .cornerRadius(3)
-                }
-            }
-
-            ForEach(Array(saved.sentences.enumerated()), id: \.offset) { _, sentence in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(sentence.en)
-                        .font(Theme.englishFont)
-                        .foregroundStyle(Theme.textPrimary)
-                        .textSelection(.enabled)
-                    Text(sentence.zh)
-                        .font(Theme.chineseFont)
-                        .foregroundStyle(Theme.textSecondary)
-                        .textSelection(.enabled)
-                }
+    private var allSentenceItems: [ReadingItem] {
+        translations.flatMap { saved in
+            saved.sentences.enumerated().map { (i, sentence) in
+                ReadingItem(
+                    id: "\(saved.timestamp.timeIntervalSince1970)_\(i)",
+                    sentence: sentence,
+                    timestamp: saved.timestamp
+                )
             }
         }
-        .padding(16)
-        .background(Theme.cardBg)
-        .cornerRadius(10)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Theme.border.opacity(0.5), lineWidth: 1)
-        )
+    }
+
+    private func readingItemView(_ item: ReadingItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(item.sentence.en)
+                .font(.system(size: 13.5, design: .serif))
+                .foregroundStyle(Theme.textPrimary)
+                .lineSpacing(4)
+                .textSelection(.enabled)
+
+            Text(item.sentence.zh)
+                .font(.system(size: 12.5))
+                .foregroundStyle(Theme.textSecondary)
+                .lineSpacing(3)
+                .textSelection(.enabled)
+
+            HStack(spacing: 6) {
+                if let analysis = item.sentence.analysis {
+                    if !analysis.structure.isEmpty {
+                        Text(analysis.structure)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.textSecondary.opacity(0.7))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Theme.tertiaryBg)
+                            .cornerRadius(3)
+                    }
+                    if !analysis.tense.isEmpty {
+                        Text(analysis.tense)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.textSecondary.opacity(0.7))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Theme.tertiaryBg)
+                                .cornerRadius(3)
+                        }
+                    }
+                    Spacer()
+                    Text(formatTime(item.timestamp))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textSecondary.opacity(0.5))
+                }
+                .padding(.top, 2)
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 4)
+            .overlay(alignment: .bottom) {
+                Divider().foregroundColor(Theme.border.opacity(0.3))
+            }
     }
 
     private var emptyState: some View {
@@ -386,7 +398,8 @@ struct ReadingView: View {
     }
 
     private func loadTranslations(date: String) {
-        translations = translationStore.getTranslations(date: date, sourceApp: filterApp)
+        translations = translationStore.getTranslations(date: date, sourceApp: filterApp, sourceUrl: filterUrl)
+        appLog("[Reading] Loaded \(translations.count) translations for \(date), total sentences: \(translations.reduce(0) { $0 + $1.sentences.count })")
     }
 
     // MARK: - Formatting
@@ -407,132 +420,366 @@ struct ReadingView: View {
         formatter.dateFormat = "HH:mm:ss"
         return formatter.string(from: date)
     }
+
+    private func extractDomain(_ url: String) -> String {
+        guard !url.isEmpty, let parsed = URL(string: url), let host = parsed.host else { return "" }
+        // Strip "www." prefix
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+}
+
+// MARK: - Date Row Button (with hover)
+private struct DateRowButton: View {
+    let dateEntry: TranslationStore.ReadingDate
+    let isSelected: Bool
+    let displayText: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(displayText)
+                        .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                        .foregroundStyle(isSelected ? Theme.accent : Theme.textPrimary)
+
+                    Text("\(dateEntry.translationCount) 句")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+            .background(isSelected ? Theme.accent.opacity(0.08) : isHovered ? Theme.textSecondary.opacity(0.06) : Color.clear)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
+    }
 }
 
 // MARK: - Stats Tab
 struct StatsView: View {
     let translationStore: TranslationStore
     @State private var stats: TranslationStore.ReadingStats?
+    @State private var dailyCounts: [String: Int] = [:]  // "YYYY-MM-DD" -> sentence count
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+        GeometryReader { geo in
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 20) {
                 if let stats = stats {
-                    // Today
-                    statSection("今日") {
-                        HStack(spacing: 24) {
-                            statCard(value: stats.todayTranslations, label: "翻译", icon: "doc.text")
-                            statCard(value: stats.todayLookups, label: "查词", icon: "book")
-                        }
+                    // Stats grid: 2x2
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                        statPill("今日", translations: stats.todayTranslations, lookups: stats.todayLookups)
+                        statPill("本周", translations: stats.weekTranslations, lookups: stats.weekLookups)
+                        statPill("本月", translations: stats.monthTranslations, lookups: stats.monthLookups)
+                        statPill("累计", translations: stats.totalTranslations, lookups: stats.totalLookups)
                     }
 
-                    // This week
-                    statSection("本周") {
-                        HStack(spacing: 24) {
-                            statCard(value: stats.weekTranslations, label: "翻译", icon: "doc.text")
-                            statCard(value: stats.weekLookups, label: "查词", icon: "book")
+                    // Contribution calendar
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("阅读活跃度")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Theme.textPrimary)
+                            Spacer()
+                            // Legend inline with title
+                            HStack(spacing: 3) {
+                                Text("少")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Theme.textSecondary)
+                                ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { level in
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(level == 0 ? Theme.tertiaryBg : Theme.accent.opacity(0.2 + level * 0.8))
+                                        .frame(width: 10, height: 10)
+                                }
+                                Text("多")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
                         }
-                    }
 
-                    // This month
-                    statSection("本月") {
-                        HStack(spacing: 24) {
-                            statCard(value: stats.monthTranslations, label: "翻译", icon: "doc.text")
-                            statCard(value: stats.monthLookups, label: "查词", icon: "book")
-                        }
+                        ContributionCalendar(dailyCounts: dailyCounts)
                     }
-
-                    // Total
-                    statSection("累计") {
-                        HStack(spacing: 24) {
-                            statCard(value: stats.totalTranslations, label: "翻译", icon: "doc.text")
-                            statCard(value: stats.totalLookups, label: "查词", icon: "book")
-                        }
-                    }
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Theme.cardBg)
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.border.opacity(0.5), lineWidth: 1))
 
                     // Active Apps
                     if !stats.activeApps.isEmpty {
-                        statSection("常用应用") {
-                            FlowLayout(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("常用应用")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                            FlowLayout(spacing: 6) {
                                 ForEach(stats.activeApps, id: \.self) { app in
                                     Text(app)
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Theme.textPrimary)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 5)
+                                        .font(.system(size: 11))
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
                                         .background(Theme.tertiaryBg)
-                                        .cornerRadius(6)
+                                        .cornerRadius(4)
                                 }
                             }
                         }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.cardBg)
+                        .cornerRadius(10)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.border.opacity(0.5), lineWidth: 1))
                     }
 
                     // Top URLs
                     if !stats.topUrls.isEmpty {
-                        statSection("热门来源") {
-                            VStack(spacing: 8) {
-                                ForEach(stats.topUrls, id: \.url) { item in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("热门来源")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                            VStack(spacing: 4) {
+                                ForEach(stats.topUrls.prefix(5), id: \.url) { item in
                                     HStack {
-                                        Text(item.url)
-                                            .lineLimit(1)
-                                            .font(.system(size: 12))
+                                        Text(extractDomain(item.url))
+                                            .font(.system(size: 11))
                                             .foregroundStyle(Theme.textPrimary)
+                                            .lineLimit(1)
                                         Spacer()
                                         Text("\(item.count)")
-                                            .font(.system(size: 11, weight: .medium))
+                                            .font(.system(size: 10, weight: .medium))
                                             .foregroundStyle(Theme.accent)
                                     }
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
-                                    .background(Theme.tertiaryBg)
-                                    .cornerRadius(6)
                                 }
                             }
                         }
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.cardBg)
+                        .cornerRadius(10)
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.border.opacity(0.5), lineWidth: 1))
                     }
                 } else {
                     ProgressView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .padding(24)
+            .padding(20)
+            .frame(width: geo.size.width)
+        }
         }
         .background(Theme.bg)
         .onAppear {
             stats = translationStore.getStats()
+            loadDailyCounts()
         }
     }
 
-    private func statSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Theme.textPrimary)
-            content()
-        }
-    }
-
-    private func statCard(value: Int, label: String, icon: String) -> some View {
-        VStack(spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 20))
-                .foregroundStyle(Theme.accent)
-
-            Text("\(value)")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundStyle(Theme.textPrimary)
-
+    private func statPill(_ label: String, translations: Int, lookups: Int) -> some View {
+        HStack {
             Text(label)
-                .font(.system(size: 12))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Theme.textSecondary)
+            Spacer()
+            HStack(spacing: 10) {
+                HStack(spacing: 3) {
+                    Image(systemName: "doc.text")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.accent)
+                    Text("\(translations)")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                HStack(spacing: 3) {
+                    Image(systemName: "book")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.teal)
+                    Text("\(lookups)")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+            }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 20)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .background(Theme.cardBg)
-        .cornerRadius(12)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Theme.border.opacity(0.5), lineWidth: 1)
-        )
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.border.opacity(0.5), lineWidth: 1))
+    }
+
+    private func extractDomain(_ url: String) -> String {
+        guard !url.isEmpty, let parsed = URL(string: url), let host = parsed.host else { return url }
+        return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    }
+
+    private func loadDailyCounts() {
+        let dates = translationStore.getReadingDates(limit: 365)
+        dailyCounts = Dictionary(uniqueKeysWithValues: dates.map { ($0.date, $0.translationCount) })
+    }
+}
+
+// MARK: - Calendar hover state (shared across all cells)
+class CalendarHoverState: ObservableObject {
+    @Published var hoveredKey: String?
+    @Published var hoveredCount: Int = 0
+    @Published var hoveredPosition: CGPoint = .zero
+}
+
+// MARK: - GitHub-style Contribution Calendar
+struct ContributionCalendar: View {
+    let dailyCounts: [String: Int]
+    @StateObject private var hover = CalendarHoverState()
+    private let cellSpacing: CGFloat = 3
+    private let labelWidth: CGFloat = 28
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f
+    }()
+    private static let monthFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "M月"; return f
+    }()
+
+    private var maxCount: Int { max(dailyCounts.values.max() ?? 1, 1) }
+
+    private struct WeekData {
+        let days: [Date]
+        let monthLabel: String?  // shown on first week of each month
+    }
+
+    private func generateWeeks(count: Int) -> [WeekData] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let weekday = cal.component(.weekday, from: today) // 1=Sun
+
+        var result: [WeekData] = []
+        var labeledMonths: Set<Int> = []
+
+        for weekOffset in stride(from: count - 1, through: 0, by: -1) {
+            let days = (0..<7).map { day in
+                cal.date(byAdding: .day, value: -(weekOffset * 7) + day - (7 - weekday), to: today)!
+            }
+            // Check if this week contains the 1st of any month
+            var label: String? = nil
+            for date in days {
+                if cal.component(.day, from: date) == 1 {
+                    let month = cal.component(.month, from: date)
+                    if !labeledMonths.contains(month) {
+                        label = Self.monthFormatter.string(from: date)
+                        labeledMonths.insert(month)
+                    }
+                    break
+                }
+            }
+            result.append(WeekData(days: days, monthLabel: label))
+        }
+        return result
+    }
+
+    private func dateKey(_ date: Date) -> String { Self.dateFormatter.string(from: date) }
+
+    private func cellColor(_ date: Date) -> Color {
+        let count = dailyCounts[dateKey(date)] ?? 0
+        if count == 0 { return Theme.tertiaryBg }
+        return Theme.accent.opacity(0.15 + min(Double(count) / Double(maxCount), 1.0) * 0.85)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let availableWidth = geo.size.width - labelWidth
+            let cellSize: CGFloat = 12
+            let weekCount = Int(availableWidth / (cellSize + cellSpacing))
+            let weeks = generateWeeks(count: weekCount)
+            let gridWidth = labelWidth + cellSpacing + CGFloat(weekCount) * (cellSize + cellSpacing)
+
+            VStack(alignment: .leading, spacing: 2) {
+                // Month labels — positioned at each month's first week column
+                ZStack(alignment: .topLeading) {
+                    Color.clear.frame(height: 14)
+                    ForEach(Array(weeks.enumerated()), id: \.offset) { i, week in
+                        if let label = week.monthLabel {
+                            Text(label)
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.textSecondary)
+                                .fixedSize()
+                                .offset(x: labelWidth + cellSpacing + CGFloat(i) * (cellSize + cellSpacing))
+                        }
+                    }
+                }
+
+                // Grid: day labels + cells
+                HStack(spacing: cellSpacing) {
+                    // Day of week labels
+                    VStack(spacing: cellSpacing) {
+                        ForEach(["日", "一", "", "三", "", "五", ""], id: \.self) { label in
+                            Text(label)
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.textSecondary)
+                                .frame(width: labelWidth, height: cellSize, alignment: .trailing)
+                        }
+                    }
+
+                    // Week columns
+                    ForEach(Array(weeks.enumerated()), id: \.offset) { _, week in
+                        VStack(spacing: cellSpacing) {
+                            ForEach(Array(week.days.enumerated()), id: \.offset) { _, date in
+                                let key = dateKey(date)
+                                let count = dailyCounts[key] ?? 0
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(cellColor(date))
+                                    .frame(width: cellSize, height: cellSize)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .stroke(hover.hoveredKey == key ? Theme.accent : Color.clear, lineWidth: 1)
+                                    )
+                                    .onHover { h in
+                                        if h {
+                                            hover.hoveredKey = key
+                                            hover.hoveredCount = count
+                                        } else if hover.hoveredKey == key {
+                                            hover.hoveredKey = nil
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(width: gridWidth)
+            .frame(maxWidth: .infinity)
+            .overlay(alignment: .topLeading) {
+                if let key = hover.hoveredKey {
+                    Text(hover.hoveredCount > 0 ? "\(hover.hoveredCount) 句 · \(key)" : key)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.85))
+                        .cornerRadius(5)
+                        .fixedSize()
+                        .position(tooltipPosition(for: key, cellSize: cellSize, weeks: weeks, gridWidth: gridWidth))
+                        .allowsHitTesting(false)
+                        .animation(.none, value: key)
+                }
+            }
+        }
+        .frame(height: 12 * 7 + 3 * 6 + 20)
+    }
+
+    private func tooltipPosition(for key: String, cellSize: CGFloat, weeks: [WeekData], gridWidth: CGFloat) -> CGPoint {
+        // Find the week and day index for this key
+        for (wi, week) in weeks.enumerated() {
+            for (di, date) in week.days.enumerated() {
+                if dateKey(date) == key {
+                    let x = labelWidth + cellSpacing + CGFloat(wi) * (cellSize + cellSpacing) + cellSize / 2
+                    let y = 14 + 2 + CGFloat(di) * (cellSize + cellSpacing) - 10 // above the cell
+                    // Center horizontally, clamp to grid bounds
+                    let clampedX = min(max(x, 50), gridWidth - 50)
+                    return CGPoint(x: clampedX, y: max(y, 6))
+                }
+            }
+        }
+        return .zero
     }
 }

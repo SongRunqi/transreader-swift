@@ -199,36 +199,53 @@ struct VocabCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header row (always visible)
+            // Collapsed card (always visible)
             Button(action: onTap) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 8) {
-                            Text(entry.word)
-                                .font(.system(size: 16, weight: .semibold, design: .serif))
-                                .foregroundStyle(Theme.textPrimary)
+                VStack(alignment: .leading, spacing: 4) {
+                    // Row 1: word + pos badge
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(entry.word)
+                            .font(.system(size: 16, weight: .semibold, design: .serif))
+                            .foregroundStyle(Theme.textPrimary)
 
-                            if let phonetic = entry.phonetic {
-                                Text("/\(phonetic)/")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.textSecondary)
-                            }
+                        if let pos = entry.pos, !pos.isEmpty {
+                            Text(pos.uppercased())
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Theme.accent.opacity(0.1))
+                                .cornerRadius(3)
                         }
 
-                        if let firstMeaning = entry.meanings?.first {
-                            Text(firstMeaning)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Theme.textSecondary)
-                                .lineLimit(1)
-                        }
+                        Spacer()
+
+                        Text(entry.addedAt.prefix(10))
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.textSecondary.opacity(0.5))
                     }
 
-                    Spacer()
+                    // Row 2: Chinese meaning (short summary)
+                    let shortMeaning: String? = {
+                        if let zh = entry.zh, !zh.isEmpty { return zh }
+                        if let m = entry.meanings, let first = m.first, !first.isEmpty { return first.stripHTML() }
+                        return nil
+                    }()
+                    if let text = shortMeaning {
+                        Text(text)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Theme.textPrimary)
+                            .lineLimit(1)
+                    }
 
-                    Image(systemName: isSelected ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Theme.textSecondary.opacity(0.5))
-                        .padding(.top, 4)
+                    // Row 3: context (truncated)
+                    if let context = entry.context, !context.isEmpty {
+                        Text(context)
+                            .font(.system(size: 12, design: .serif))
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
@@ -238,18 +255,29 @@ struct VocabCardView: View {
             // Expanded detail
             if isSelected {
                 VStack(alignment: .leading, spacing: 12) {
-                    // All meanings
-                    if let meanings = entry.meanings, meanings.count > 1 {
+                    // Full meaning (split by `;` into separate lines)
+                    if let meaning = entry.meaning, !meaning.isEmpty {
+                        let parts = meaning.components(separatedBy: ";")
+                            .map { $0.trimmingCharacters(in: .whitespaces).stripHTML() }
+                            .filter { !$0.isEmpty }
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+                                Text(part)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+
+                    // Swift-sourced meanings (from DictionaryEntry)
+                    if let meanings = entry.meanings, !meanings.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            ForEach(Array(meanings.enumerated()), id: \.offset) { _, meaning in
-                                HStack(alignment: .top, spacing: 6) {
-                                    Text("·")
-                                        .foregroundStyle(Theme.textSecondary)
-                                    Text(meaning)
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(Theme.textPrimary)
-                                        .textSelection(.enabled)
-                                }
+                            ForEach(Array(meanings.enumerated()), id: \.offset) { _, m in
+                                Text(m.stripHTML())
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .textSelection(.enabled)
                             }
                         }
                     }
@@ -260,9 +288,8 @@ struct VocabCardView: View {
                             Text("例句")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(Theme.textSecondary)
-
-                            ForEach(Array(examples.enumerated()), id: \.offset) { _, example in
-                                Text(example)
+                            ForEach(Array(examples.enumerated()), id: \.offset) { _, ex in
+                                Text(ex)
                                     .font(.system(size: 12))
                                     .foregroundStyle(Theme.textSecondary)
                                     .textSelection(.enabled)
@@ -276,24 +303,29 @@ struct VocabCardView: View {
                             Text("近义:")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(Theme.textSecondary)
-
-                            Text(synonyms.joined(separator: ", "))
+                            Text(synonyms.joined(separator: " · "))
                                 .font(.system(size: 12))
                                 .foregroundStyle(Theme.accent)
                         }
                     }
 
-                    // Date + delete
-                    HStack {
-                        if !entry.addedAt.isEmpty {
-                            Text(formatDate(entry.addedAt))
-                                .font(.system(size: 10))
-                                .foregroundStyle(Theme.textSecondary.opacity(0.6))
+                    // Context (full, untruncated)
+                    if let context = entry.context, !context.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("记忆上下文")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                            Text(context)
+                                .font(.system(size: 12, design: .serif))
+                                .foregroundStyle(Theme.textPrimary.opacity(0.8))
+                                .textSelection(.enabled)
                         }
+                    }
+
+                    // Delete
+                    HStack {
                         Spacer()
-                        Button {
-                            onDelete()
-                        } label: {
+                        Button { onDelete() } label: {
                             Image(systemName: "trash")
                                 .font(.system(size: 11))
                                 .foregroundStyle(Theme.textSecondary.opacity(0.5))

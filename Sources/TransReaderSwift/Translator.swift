@@ -126,50 +126,65 @@ actor Translator {
 
                 var hasUpdate = false
 
-                // Extract en/zh text (possibly incomplete)
-                let (enText, _) = extractPartialString(from: accumulated, field: "en")
-                if let e = enText, e != enStreamed {
-                    enStreamed = e
-                    hasUpdate = true
-                }
-
-                let (zhText, _) = extractPartialString(from: accumulated, field: "zh")
-                if let z = zhText, z != zhStreamed {
-                    zhStreamed = z
-                    hasUpdate = true
-                }
-
-                // Extract analysis fields
-                let (sText, _) = extractPartialString(from: accumulated, field: "structure")
-                if let s = sText, s != structureStreamed {
-                    structureStreamed = s
-                    hasUpdate = true
-                }
-
-                let (tText, _) = extractPartialString(from: accumulated, field: "tense")
-                if let t = tText, t != tenseStreamed {
-                    tenseStreamed = t
-                    hasUpdate = true
-                }
-
-                // Extract completed analysis chunks incrementally
-                let newChunks = extractAnalysisChunks(from: accumulated, after: chunksEmitted)
+                // Extract analysis chunks incrementally (complete + partial branch)
+                let (newChunks, partialBranch) = extractAnalysisChunksWithPartial(from: accumulated, after: chunksEmitted)
                 if !newChunks.isEmpty {
                     allStreamedChunks.append(contentsOf: newChunks)
                     chunksEmitted += newChunks.count
                     hasUpdate = true
                 }
+                // Track partial branch separately (don't add to chunksEmitted)
+                let currentPartialBranch = partialBranch
 
-                let (tipText, _) = extractPartialString(from: accumulated, field: "tip")
-                if let t = tipText, t != tipStreamed {
-                    tipStreamed = t
-                    hasUpdate = true
+                // Extract sentence-level fields ONLY from text after the analysis block closes.
+                // This prevents matching chunk-level "en"/"zh" during analysis streaming.
+                let afterAnalysis = textAfterAnalysisBlock(accumulated)
+
+                if let text = afterAnalysis {
+                    let (enText, _) = extractPartialString(from: text, field: "en")
+                    if let e = enText, e != enStreamed {
+                        enStreamed = e
+                        hasUpdate = true
+                    }
+
+                    let (zhText, _) = extractPartialString(from: text, field: "zh")
+                    if let z = zhText, z != zhStreamed {
+                        zhStreamed = z
+                        hasUpdate = true
+                    }
+
+                    let (sText, _) = extractPartialString(from: text, field: "structure")
+                    if let s = sText, s != structureStreamed {
+                        structureStreamed = s
+                        hasUpdate = true
+                    }
+
+                    let (tText, _) = extractPartialString(from: text, field: "tense")
+                    if let t = tText, t != tenseStreamed {
+                        tenseStreamed = t
+                        hasUpdate = true
+                    }
+
+                    let (tipText, _) = extractPartialString(from: text, field: "tip")
+                    if let t = tipText, t != tipStreamed {
+                        tipStreamed = t
+                        hasUpdate = true
+                    }
                 }
+
+                // Also treat partial branch changes as updates
+                if currentPartialBranch != nil { hasUpdate = true }
 
                 // Emit progressive update if anything changed
                 if hasUpdate {
+                    // Combine complete chunks + partial branch for display
+                    var displayChunks = allStreamedChunks
+                    if let partial = currentPartialBranch {
+                        displayChunks.append(partial)
+                    }
+
                     let hasAnalysis = !structureStreamed.isEmpty || !tenseStreamed.isEmpty
-                        || !allStreamedChunks.isEmpty || !tipStreamed.isEmpty
+                        || !displayChunks.isEmpty || !tipStreamed.isEmpty
 
                     let sentence = Sentence(
                         en: enStreamed,
@@ -177,7 +192,7 @@ actor Translator {
                         analysis: hasAnalysis ? Analysis(
                             structure: structureStreamed,
                             tense: tenseStreamed,
-                            chunks: allStreamedChunks,
+                            chunks: displayChunks,
                             tip: tipStreamed
                         ) : nil,
                         isPartial: true,
@@ -241,7 +256,19 @@ actor Translator {
             let jsonStr = String(remaining[..<endIndex])
             if let data = jsonStr.data(using: .utf8) {
                 do {
+                    let compactJson = jsonStr.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "  ", with: "")
+                    appLog("[Translate] Raw JSON: \(compactJson)")
                     let obj = try JSONDecoder().decode(Sentence.self, from: data)
+                    appLog("[Translate] Decoded sentence: en=\(obj.en.prefix(80)), zh=\(obj.zh.prefix(80)), chunks=\(obj.analysis?.chunks.count ?? 0)")
+                    if let chunks = obj.analysis?.chunks {
+                        func logChunks(_ chunks: [Chunk], indent: String = "  ") {
+                            for (i, c) in chunks.enumerated() {
+                                appLog("[Translate] \(indent)chunk[\(i)] role=\(c.role) en=\"\(c.en.prefix(60))\" zh=\"\(c.zh.prefix(60))\" children=\(c.children?.count ?? 0)")
+                                if let kids = c.children { logChunks(kids, indent: indent + "  ") }
+                            }
+                        }
+                        logChunks(chunks)
+                    }
                     objects.append(obj)
                 } catch {
                     appLog("[Translate] JSON decode error: \(error.localizedDescription)")
@@ -260,10 +287,18 @@ actor Translator {
     /// Extract a JSON string field value from a partial buffer.
     /// Returns `(value, isComplete)` — value is nil if the field hasn't started yet,
     /// isComplete is true if the closing quote was found.
-    private func extractPartialString(from text: String, field: String) -> (String?, Bool) {
+    /// When `lastMatch` is true, finds the last occurrence of the field (for sentence-level
+    /// en/zh which appear after chunk-level en/zh in analyze mode).
+    private func extractPartialString(from text: String, field: String, lastMatch: Bool = false) -> (String?, Bool) {
         // Find "field" : "
         let key = "\"\(field)\""
-        guard let keyRange = text.range(of: key) else { return (nil, false) }
+        let keyRange: Range<String.Index>?
+        if lastMatch {
+            keyRange = text.range(of: key, options: .backwards)
+        } else {
+            keyRange = text.range(of: key)
+        }
+        guard let keyRange else { return (nil, false) }
 
         // Advance past the key to find : "
         var idx = keyRange.upperBound
@@ -309,15 +344,17 @@ actor Translator {
         return (unescapeJSON(raw), false)
     }
 
-    /// Extract completed Chunk objects from the "chunks" array in a partial buffer.
-    /// Skips the first `skipCount` objects (already emitted) and returns only new ones.
-    private func extractAnalysisChunks(from text: String, after skipCount: Int) -> [Chunk] {
+    /// Extract Chunk objects from the "chunks" array in a partial buffer.
+    /// Returns (completeChunks, partialBranch):
+    /// - completeChunks: fully parsed chunks after skipCount
+    /// - partialBranch: an incomplete branch chunk being streamed (role + available children)
+    private func extractAnalysisChunksWithPartial(from text: String, after skipCount: Int) -> ([Chunk], Chunk?) {
         // Find "chunks" : [
         let pattern = "\"chunks\"\\s*:\\s*\\["
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let matchRange = Range(match.range, in: text) else {
-            return []
+            return ([], nil)
         }
 
         let arrayStart = matchRange.upperBound
@@ -326,36 +363,128 @@ actor Translator {
         var skipped = 0
 
         while true {
-            // Skip whitespace and commas
             let trimmed = remaining.drop(while: { " \t\n\r,".contains($0) })
             remaining = String(trimmed)
 
-            // Check for end of array or incomplete content
             if remaining.first == "]" { break }
             guard remaining.first == "{" else { break }
 
-            // Find matching closing brace
-            guard let endIdx = findMatchingBrace(in: remaining) else { break }
+            // Try to find matching closing brace
+            if let endIdx = findMatchingBrace(in: remaining) {
+                let jsonStr = String(remaining[..<endIdx])
+                remaining = String(remaining[endIdx...])
 
-            let jsonStr = String(remaining[..<endIdx])
-            remaining = String(remaining[endIdx...])
+                if skipped < skipCount {
+                    skipped += 1
+                    continue
+                }
 
-            // Skip already-emitted chunks
-            if skipped < skipCount {
-                skipped += 1
-                continue
-            }
-
-            if let data = jsonStr.data(using: .utf8),
-               let chunk = try? JSONDecoder().decode(Chunk.self, from: data) {
-                chunks.append(chunk)
+                if let data = jsonStr.data(using: .utf8),
+                   let chunk = try? JSONDecoder().decode(Chunk.self, from: data) {
+                    chunks.append(chunk)
+                }
+            } else {
+                // Incomplete object — try to extract as partial branch
+                if skipped < skipCount {
+                    break // still within already-emitted range, skip
+                }
+                let partial = extractPartialBranch(from: remaining)
+                return (chunks, partial)
             }
         }
 
-        return chunks
+        return (chunks, nil)
+    }
+
+    /// Extract a partial branch chunk from an incomplete JSON object.
+    /// Parses `role` and any complete children from `{"role":"...","children":[{...},{...}`
+    private func extractPartialBranch(from text: String) -> Chunk? {
+        // Extract role
+        let (role, _) = extractPartialString(from: text, field: "role")
+        guard let role, !role.isEmpty else { return nil }
+
+        // Check for children array
+        let childPattern = "\"children\"\\s*:\\s*\\["
+        guard let childRegex = try? NSRegularExpression(pattern: childPattern),
+              let childMatch = childRegex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let childRange = Range(childMatch.range, in: text) else {
+            // Leaf chunk still incomplete — extract en/zh if available
+            let (en, _) = extractPartialString(from: text, field: "en")
+            let (zh, _) = extractPartialString(from: text, field: "zh")
+            if en != nil || zh != nil {
+                return Chunk(en: en ?? "", zh: zh ?? "", role: role, children: nil)
+            }
+            return Chunk(en: "", zh: "", role: role, children: [])
+        }
+
+        // Extract complete children from the children array
+        var childRemaining = String(text[childRange.upperBound...])
+        var children: [Chunk] = []
+
+        while true {
+            let trimmed = childRemaining.drop(while: { " \t\n\r,".contains($0) })
+            childRemaining = String(trimmed)
+
+            if childRemaining.first == "]" { break }
+            guard childRemaining.first == "{" else { break }
+
+            if let endIdx = findMatchingBrace(in: childRemaining) {
+                let jsonStr = String(childRemaining[..<endIdx])
+                childRemaining = String(childRemaining[endIdx...])
+
+                if let data = jsonStr.data(using: .utf8),
+                   let chunk = try? JSONDecoder().decode(Chunk.self, from: data) {
+                    children.append(chunk)
+                }
+            } else {
+                // Recurse: incomplete child might also be a branch
+                if let partialChild = extractPartialBranch(from: childRemaining) {
+                    children.append(partialChild)
+                }
+                break
+            }
+        }
+
+        return Chunk(en: "", zh: "", role: role, children: children)
     }
 
     // MARK: - Helpers
+
+    /// Returns the portion of the buffer AFTER the `"analysis": {...}` block closes.
+    /// If the analysis block hasn't closed yet, returns nil.
+    /// If there's no "analysis" key, returns the full text (en/zh come first in read mode).
+    private func textAfterAnalysisBlock(_ text: String) -> String? {
+        let key = "\"analysis\""
+        guard let keyRange = text.range(of: key) else {
+            // No analysis key — en/zh are at the top level (read mode), use full text
+            return text
+        }
+
+        // Find the opening { of the analysis value
+        var searchIdx = keyRange.upperBound
+        while searchIdx < text.endIndex {
+            let c = text[searchIdx]
+            if c == "{" { break }
+            if c == ":" || c == " " || c == "\t" || c == "\n" || c == "\r" {
+                searchIdx = text.index(after: searchIdx)
+                continue
+            }
+            return nil // unexpected
+        }
+        guard searchIdx < text.endIndex else { return nil }
+
+        // Extract substring starting from { and find matching }
+        let substring = String(text[searchIdx...])
+        guard let braceEnd = findMatchingBrace(in: substring) else {
+            // Analysis block not yet closed — don't extract en/zh
+            return nil
+        }
+
+        // braceEnd is relative to substring; convert to offset
+        let offset = substring.distance(from: substring.startIndex, to: braceEnd)
+        let afterIdx = text.index(searchIdx, offsetBy: offset)
+        return String(text[afterIdx...])
+    }
 
     /// Find the index after the matching `}` for a string starting with `{`.
     /// Correctly handles nested braces, string literals, and escape sequences.

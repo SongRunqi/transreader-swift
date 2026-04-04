@@ -115,7 +115,10 @@ enum Theme {
     }
 
     static let englishFont: Font = .custom("New York", size: 15, relativeTo: .body)
+    @MainActor static let englishNSFont: NSFont = NSFont(name: "New York", size: 15) ?? .systemFont(ofSize: 15)
     static let chineseFont: Font = .system(size: 14)
+
+    static let teal = Color(red: 0.29, green: 0.55, blue: 0.55) // #4A8B8D
 
     // MARK: - Tip Box Colors
     static var tipBg: Color {

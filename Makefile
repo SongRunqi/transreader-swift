@@ -58,11 +58,14 @@ bundle: build ## Create .app bundle (only copies binary if changed)
 			'  <key>CFBundleVersion</key>'     '<string>$(BUILD_NUMBER)</string>' \
 			'  <key>CFBundleShortVersionString</key>' '<string>$(VERSION)</string>' \
 			'  <key>CFBundlePackageType</key>' '<string>APPL</string>' \
-			'  <key>LSUIElement</key>'         '<true/>' \
+			'  <key>CFBundleIconFile</key>'    '<string>AppIcon</string>' \
+			'  <key>LSUIElement</key>'         '<false/>' \
 			'</dict>' \
 			'</plist>' > "$(CONTENTS_DIR)/Info.plist"; \
 		touch "$(OUT_DIR)/.needs-sign"; \
 	fi
+	@mkdir -p "$(CONTENTS_DIR)/Resources"
+	@if [ -f "Resources/AppIcon.icns" ]; then cp "Resources/AppIcon.icns" "$(CONTENTS_DIR)/Resources/AppIcon.icns"; fi
 	@if [ ! -f "$(ENTITLEMENTS)" ]; then \
 		printf '%s\n' \
 			'<?xml version="1.0" encoding="UTF-8"?>' \

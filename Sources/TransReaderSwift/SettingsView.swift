@@ -51,31 +51,12 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
+        GeometryReader { geo in
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 24) {
                 // AI Provider
                 settingsSection("AI 服务商") {
-                    HStack {
-                        providerCards
-
-                        // Latency test button
-                        Button {
-                            appState.testProviderLatency()
-                        } label: {
-                            if appState.isTestingLatency {
-                                ProgressView()
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "speedometer")
-                                    .font(.system(size: 14))
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Theme.textSecondary)
-                        .help("测速")
-                        .disabled(appState.isTestingLatency)
-                        .frame(width: 30)
-                    }
+                    providerCards
 
                     VStack(alignment: .leading, spacing: 6) {
                         Text("API Key")
@@ -114,7 +95,7 @@ struct SettingsView: View {
                             HStack(spacing: 4) {
                                 TextField("", value: $requestTimeout, format: .number)
                                     .textFieldStyle(.plain)
-                                    .frame(width: 60)
+                                    .frame(minWidth: 50, maxWidth: 70)
                                     .padding(6)
                                     .background(Theme.bg)
                                     .cornerRadius(4)
@@ -141,7 +122,7 @@ struct SettingsView: View {
                             Text("阅读模式").tag(DisplayMode.read)
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 200)
+                        .fixedSize()
                     }
 
                     Text(displayMode == .analyze ? "优先显示语法分析" : "优先显示翻译文本")
@@ -260,27 +241,22 @@ struct SettingsView: View {
                                 Text(actionName(key))
                                     .font(.system(size: 13))
                                     .foregroundStyle(Theme.textPrimary)
-                                    .frame(width: 120, alignment: .leading)
+                                    .frame(minWidth: 60, alignment: .leading)
 
-                                TextField("", text: Binding(
-                                    get: { shortcuts[key] ?? "" },
-                                    set: { shortcuts[key] = $0 }
-                                ))
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 12, design: .monospaced))
-                                .padding(6)
-                                .background(Theme.bg)
-                                .cornerRadius(4)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Theme.border, lineWidth: 1)
+                                Spacer()
+
+                                ShortcutRecorder(
+                                    shortcut: Binding(
+                                        get: { shortcuts[key] ?? "" },
+                                        set: { shortcuts[key] = $0 }
+                                    )
                                 )
-                                .frame(maxWidth: 200)
+                                .frame(width: 140)
                             }
                         }
                     }
 
-                    Text("格式: option+cmd+字母 (例: option+cmd+t)")
+                    Text("点击按钮后按下快捷键组合进行录制")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.textSecondary)
                 }
@@ -397,6 +373,8 @@ struct SettingsView: View {
                 }
             }
             .padding(24)
+            .frame(width: geo.size.width)
+        }
         }
         .background(Theme.bg)
     }
@@ -410,7 +388,7 @@ struct SettingsView: View {
     }
 
     private var providerCards: some View {
-        HStack(spacing: 10) {
+        FlowLayout(spacing: 8) {
             ForEach(Array(Providers.all.keys.sorted()), id: \.self) { id in
                 let provider = Providers.all[id]!
                 let isSelected = selectedProvider == id
@@ -421,7 +399,7 @@ struct SettingsView: View {
                     apiKey = appState.configStore.config.apiKeys[id] ?? ""
                     customModel = appState.configStore.config.customModels[id] ?? ""
                 } label: {
-                    VStack(spacing: 4) {
+                    HStack(spacing: 6) {
                         Text(provider.name)
                             .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
                             .foregroundStyle(isSelected ? Theme.accent : Theme.textPrimary)
@@ -432,20 +410,33 @@ struct SettingsView: View {
                                 .foregroundStyle(Theme.accent)
                         }
 
-                        // Latency result
                         latencyLabel(for: id, hasKey: hasKey)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(isSelected ? Theme.accent.opacity(0.08) : Theme.tertiaryBg)
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(isSelected ? Theme.accent.opacity(0.5) : Theme.border.opacity(0.5), lineWidth: 1)
-                    )
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(isSelected ? Theme.accent.opacity(0.1) : Theme.tertiaryBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
             }
+
+            // Latency test button
+            Button {
+                appState.testProviderLatency()
+            } label: {
+                if appState.isTestingLatency {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 20, height: 20)
+                } else {
+                    Image(systemName: "speedometer")
+                        .font(.system(size: 13))
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary)
+            .help("测速")
+            .disabled(appState.isTestingLatency)
         }
     }
 
@@ -491,7 +482,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 content()
             }
-            .padding(16)
+            .padding(12)
             .background(Theme.cardBg)
             .cornerRadius(10)
             .overlay(
@@ -673,5 +664,171 @@ struct AccentButtonStyle: ButtonStyle {
             .padding(.vertical, 8)
             .background(configuration.isPressed ? Theme.accent.opacity(0.8) : Theme.accent)
             .cornerRadius(6)
+    }
+}
+
+// MARK: - Shortcut Recorder (press key combo to record)
+struct ShortcutRecorder: NSViewRepresentable {
+    @Binding var shortcut: String
+
+    func makeNSView(context: Context) -> ShortcutRecorderNSView {
+        let view = ShortcutRecorderNSView()
+        view.shortcut = shortcut
+        view.onChange = { newValue in
+            shortcut = newValue
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: ShortcutRecorderNSView, context: Context) {
+        nsView.shortcut = shortcut
+    }
+}
+
+class ShortcutRecorderNSView: NSView {
+    var shortcut: String = "" { didSet { needsDisplay = true } }
+    var onChange: ((String) -> Void)?
+    private var isRecording = false { didSet { needsDisplay = true } }
+
+    override var acceptsFirstResponder: Bool { true }
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 4
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 200, height: 26)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let bg: NSColor = isRecording ? .controlAccentColor.withAlphaComponent(0.1) : .controlBackgroundColor
+        bg.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
+
+        let borderColor: NSColor = isRecording ? .controlAccentColor : .separatorColor
+        borderColor.setStroke()
+        let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+        border.lineWidth = 1
+        border.stroke()
+
+        let displayText: String
+        if isRecording {
+            displayText = "按下快捷键..."
+        } else if shortcut.isEmpty {
+            displayText = "点击录制"
+        } else {
+            displayText = formatDisplay(shortcut)
+        }
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: isRecording ? NSColor.controlAccentColor : (shortcut.isEmpty ? NSColor.secondaryLabelColor : NSColor.labelColor)
+        ]
+        let str = NSAttributedString(string: displayText, attributes: attrs)
+        let size = str.size()
+        let point = NSPoint(x: 8, y: (bounds.height - size.height) / 2)
+        str.draw(at: point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if isRecording {
+            // Click again to cancel
+            isRecording = false
+            window?.makeFirstResponder(nil)
+        } else {
+            isRecording = true
+            window?.makeFirstResponder(self)
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard isRecording else { super.keyDown(with: event); return }
+
+        let mods = event.modifierFlags.intersection([.command, .option, .shift, .control])
+
+        // Escape cancels recording
+        if event.keyCode == 0x35 {
+            isRecording = false
+            window?.makeFirstResponder(nil)
+            return
+        }
+
+        // Delete/Backspace clears the shortcut
+        if event.keyCode == 0x33 {
+            shortcut = ""
+            onChange?("")
+            isRecording = false
+            window?.makeFirstResponder(nil)
+            return
+        }
+
+        // Require at least one modifier
+        guard !mods.isEmpty else { return }
+
+        // Build shortcut string
+        var parts: [String] = []
+        if mods.contains(.control) { parts.append("ctrl") }
+        if mods.contains(.option) { parts.append("option") }
+        if mods.contains(.shift) { parts.append("shift") }
+        if mods.contains(.command) { parts.append("cmd") }
+
+        if let keyName = keyName(for: event.keyCode) {
+            parts.append(keyName)
+        } else if let chars = event.charactersIgnoringModifiers, !chars.isEmpty {
+            parts.append(chars.lowercased())
+        } else {
+            return
+        }
+
+        let result = parts.joined(separator: "+")
+        shortcut = result
+        onChange?(result)
+        isRecording = false
+        window?.makeFirstResponder(nil)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        isRecording = false
+        return super.resignFirstResponder()
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        // Ignore standalone modifier presses
+    }
+
+    private func keyName(for keyCode: UInt16) -> String? {
+        let map: [UInt16: String] = [
+            0x00: "a", 0x01: "s", 0x02: "d", 0x03: "f", 0x04: "h",
+            0x05: "g", 0x06: "z", 0x07: "x", 0x08: "c", 0x09: "v",
+            0x0B: "b", 0x0C: "q", 0x0D: "w", 0x0E: "e", 0x0F: "r",
+            0x10: "y", 0x11: "t", 0x12: "1", 0x13: "2", 0x14: "3",
+            0x15: "4", 0x17: "5", 0x16: "6", 0x1A: "7", 0x1C: "8",
+            0x19: "9", 0x1D: "0", 0x1F: "o", 0x20: "u", 0x22: "i",
+            0x23: "p", 0x25: "l", 0x26: "j", 0x28: "k", 0x2D: "n",
+            0x2E: "m",
+            0x24: "return", 0x30: "tab", 0x31: "space",
+            0x7A: "f1", 0x78: "f2", 0x63: "f3", 0x76: "f4",
+            0x60: "f5", 0x61: "f6", 0x62: "f7", 0x64: "f8",
+            0x65: "f9", 0x6D: "f10", 0x67: "f11", 0x6F: "f12",
+        ]
+        return map[keyCode]
+    }
+
+    private func formatDisplay(_ shortcut: String) -> String {
+        shortcut.components(separatedBy: "+")
+            .map { part in
+                switch part.lowercased() {
+                case "cmd", "command": return "⌘"
+                case "option", "opt", "alt": return "⌥"
+                case "shift": return "⇧"
+                case "ctrl", "control": return "⌃"
+                default: return part.uppercased()
+                }
+            }
+            .joined()
     }
 }

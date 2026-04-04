@@ -96,12 +96,8 @@ final class AppState {
     /// Show the main window without stealing focus from the current app.
     /// Uses NSApplication directly so it works from anywhere (not just SwiftUI views).
     func showWindowWithoutActivation() {
-        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) {
-            window.orderFrontRegardless()
-        } else {
-            // Window not yet created — use the callback which has access to openWindow
-            onShowWindowNoActivate?()
-        }
+        // Always use openWindow callback to ensure SwiftUI creates/restores content
+        onShowWindowNoActivate?()
     }
 
     init() {
@@ -230,7 +226,7 @@ final class AppState {
 
     func startMonitor() async {
         guard checkAccessibilityPermission() else {
-            error = "请在系统设置中授予辅助功能权限，然后重试"
+            appLog("[Monitor] Accessibility not granted — skipping monitor start")
             return
         }
         guard let monitor = selectionMonitor else { return }
