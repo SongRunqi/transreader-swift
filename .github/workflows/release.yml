@@ -1,0 +1,158 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Building version: $VERSION"
+
+      - name: Build with Swift Package Manager
+        run: swift build -c release
+
+      - name: Create .app bundle
+        run: |
+          APP_NAME="TransReader"
+          BUILD_DIR="dist"
+          APP_DIR="$BUILD_DIR/$APP_NAME.app"
+          CONTENTS_DIR="$APP_DIR/Contents"
+          MACOS_DIR="$CONTENTS_DIR/MacOS"
+          RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+          mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+
+          # Copy binary
+          cp .build/release/TransReaderSwift "$MACOS_DIR/TransReaderSwift"
+
+          # Copy icon
+          if [ -f Resources/AppIcon.icns ]; then
+            cp Resources/AppIcon.icns "$RESOURCES_DIR/AppIcon.icns"
+          fi
+
+          # Generate Info.plist
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          cat > "$CONTENTS_DIR/Info.plist" << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key>
+            <string>com.transreader.app</string>
+            <key>CFBundleName</key>
+            <string>TransReader</string>
+            <key>CFBundleDisplayName</key>
+            <string>TransReader</string>
+            <key>CFBundleExecutable</key>
+            <string>TransReaderSwift</string>
+            <key>CFBundleVersion</key>
+            <string>$BUILD_NUMBER</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$VERSION</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>LSUIElement</key>
+            <false/>
+          </dict>
+          </plist>
+          PLIST
+
+          # Generate entitlements
+          cat > "$BUILD_DIR/entitlements.plist" << ENT
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>com.apple.security.automation.apple-events</key>
+            <true/>
+          </dict>
+          </plist>
+          ENT
+
+      - name: Codesign .app bundle
+        run: |
+          APP="dist/TransReader.app"
+          ENTITLEMENTS="dist/entitlements.plist"
+
+          # Ad-hoc sign (no developer certificate needed)
+          /usr/bin/codesign --force --deep --sign - \
+            --entitlements "$ENTITLEMENTS" "$APP"
+
+          # Verify
+          /usr/bin/codesign -dvv "$APP" 2>&1 | head -5
+
+      - name: Package ZIP
+        run: |
+          cd dist
+          zip -r -y "TransReader-${{ github.ref_name }}-macOS-${{ matrix.arch }}.zip" TransReader.app
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TransReader-${{ matrix.arch }}
+          path: dist/TransReader-${{ github.ref_name }}-macOS-${{ matrix.arch }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create source repo release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/TransReader-*.zip
+
+      - name: Upload to public releases repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+
+          gh release create "$TAG" artifacts/TransReader-*.zip \
+            --repo SongRunqi/transreader-releases \
+            --title "TransReader $TAG" \
+            --notes "## TransReader $TAG (Swift)
+
+          下载对应芯片的 zip，解压后将 TransReader.app 拖入 /Applications 即可使用。
+
+          | 文件 | 适用机型 |
+          |------|----------|
+          | \`*-arm64.zip\` | Apple Silicon (M1/M2/M3/M4) |
+          | \`*-x86_64.zip\` | Intel Mac |
+
+          系统要求：macOS 14+, Swift 原生版本" \
+            || gh release upload "$TAG" artifacts/TransReader-*.zip \
+              --repo SongRunqi/transreader-releases --clobber
