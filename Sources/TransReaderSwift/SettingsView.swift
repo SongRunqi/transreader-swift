@@ -549,7 +549,7 @@ struct SettingsView: View {
         }
 
         appState.updateMonitorSettings()
-        appState.updateHotkeys()
+        appState.updateHotkeys(shortcuts)
 
         withAnimation {
             statusMessage = "已保存"

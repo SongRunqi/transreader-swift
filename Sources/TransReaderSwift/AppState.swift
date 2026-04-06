@@ -216,9 +216,10 @@ final class AppState {
         }
     }
 
-    func updateHotkeys() {
+    func updateHotkeys(_ shortcuts: [String: String]? = nil) {
+        let sc = shortcuts ?? configStore.config.shortcuts
         Task {
-            await globalHotkeys?.updateShortcuts(configStore.config.shortcuts)
+            await globalHotkeys?.updateShortcuts(sc)
         }
     }
 

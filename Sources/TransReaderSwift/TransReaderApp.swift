@@ -124,30 +124,54 @@ struct MenuBarView: View {
 
     @Environment(\.openWindow) private var openWindow
 
+    private var shortcuts: [String: String] {
+        appState.configStore.config.shortcuts
+    }
+
+    private func shortcutLabel(_ key: String) -> String {
+        guard let raw = shortcuts[key], !raw.isEmpty else { return "" }
+        let parts = raw.lowercased().components(separatedBy: "+").map { $0.trimmingCharacters(in: .whitespaces) }
+        var symbols = ""
+        var keyChar = ""
+        for part in parts {
+            switch part {
+            case "ctrl", "control": symbols += "⌃"
+            case "option", "opt", "alt": symbols += "⌥"
+            case "shift": symbols += "⇧"
+            case "cmd", "command": symbols += "⌘"
+            default: keyChar = part.uppercased()
+            }
+        }
+        if symbols.isEmpty && keyChar.count == 1 {
+            symbols = "⌥⌘"
+        }
+        return " (\(symbols)\(keyChar))"
+    }
+
     var body: some View {
-        Button("截取翻译 (⌥⌘T)") {
+        Button("截取翻译\(shortcutLabel("capture_translate"))") {
             appState.onCaptureTranslate?()
         }
 
-        Button("写作辅助 (⌥⌘E)") {
+        Button("写作辅助\(shortcutLabel("enhance_translate"))") {
             appState.onEnhanceTranslate?()
         }
 
-        Button("粘贴翻译 (⌥⌘V)") {
+        Button("粘贴翻译\(shortcutLabel("paste_translate"))") {
             appState.onPasteTranslate?()
         }
 
-        Button("显示/隐藏窗口 (⌥⌘W)") {
+        Button("显示/隐藏窗口\(shortcutLabel("toggle_window"))") {
             appState.onToggleWindow?()
         }
 
-        Button(appState.windowPinned ? "窗口置顶: 开 (⌥⌘P)" : "窗口置顶 (⌥⌘P)") {
+        Button(appState.windowPinned ? "窗口置顶: 开\(shortcutLabel("toggle_pin"))" : "窗口置顶\(shortcutLabel("toggle_pin"))") {
             appState.onTogglePin?()
         }
 
         Divider()
 
-        Button(appState.monitorEnabled ? "划词监控: 开 (⌥⌘M)" : "划词监控: 关 (⌥⌘M)") {
+        Button(appState.monitorEnabled ? "划词监控: 开\(shortcutLabel("toggle_monitor"))" : "划词监控: 关\(shortcutLabel("toggle_monitor"))") {
             appState.toggleMonitor()
         }
 
