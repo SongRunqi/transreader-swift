@@ -3,7 +3,7 @@
 
 APP_NAME     := TransReader
 BUNDLE_ID    := com.transreader.swift
-VERSION      := 1.0
+VERSION      := 2.0.1
 BUILD_NUMBER := 1
 
 SPM_BUILD_DIR := .build
