@@ -103,31 +103,29 @@ actor DictionaryService {
             return nil
         }
         
-        // Parse phonetic (simple)
+        // Parse phonetic
         var phonetic: String?
-        if let simple = json["simple"] as? [String: Any],
+        if let ec = json["ec"] as? [String: Any],
+           let word = ec["word"] as? [String: Any] {
+            phonetic = word["ukphone"] as? String ?? word["usphone"] as? String
+        }
+        if phonetic == nil,
+           let simple = json["simple"] as? [String: Any],
            let word = simple["word"] as? [[String: Any]],
-           let first = word.first,
-           let ukphone = first["ukphone"] as? String {
-            phonetic = ukphone
+           let first = word.first {
+            phonetic = first["ukphone"] as? String ?? first["usphone"] as? String
         }
         
-        // Parse meanings (ec.word[].trs[].tr[].l.i)
+        // Parse meanings (ec.word.trs[].pos + trs[].tran)
         var meanings: [String] = []
         if let ec = json["ec"] as? [String: Any],
-           let word = ec["word"] as? [[String: Any]] {
-            for wordItem in word {
-                if let trs = wordItem["trs"] as? [[String: Any]] {
-                    for tr in trs {
-                        if let trList = tr["tr"] as? [[String: Any]] {
-                            for trItem in trList {
-                                if let l = trItem["l"] as? [String: Any],
-                                   let i = l["i"] as? [String] {
-                                    meanings.append(contentsOf: i)
-                                }
-                            }
-                        }
-                    }
+           let word = ec["word"] as? [String: Any],
+           let trs = word["trs"] as? [[String: Any]] {
+            for tr in trs {
+                let pos = tr["pos"] as? String ?? ""
+                let tran = tr["tran"] as? String ?? ""
+                if !tran.isEmpty {
+                    meanings.append(pos.isEmpty ? tran : "\(pos) \(tran)")
                 }
             }
         }
