@@ -106,6 +106,11 @@ struct ContentView: View {
                 selectedTab = .settings
             }
         }
+        .onChange(of: appState.currentTranslation?.timestamp) { _, timestamp in
+            if timestamp != nil {
+                selectedTab = .results
+            }
+        }
         .overlay {
             if appState.showWordPopover {
                 wordLookupOverlay
@@ -133,7 +138,7 @@ struct ContentView: View {
             // Dimmed backdrop
             Color.black.opacity(0.3)
                 .ignoresSafeArea()
-                .onTapGesture { appState.showWordPopover = false }
+                .onTapGesture { appState.dismissWordLookup() }
 
             VStack(spacing: 0) {
                 HStack {
@@ -142,7 +147,7 @@ struct ContentView: View {
                         .foregroundStyle(Theme.textPrimary)
                     Spacer()
                     Button {
-                        appState.showWordPopover = false
+                        appState.dismissWordLookup()
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 12, weight: .bold))
@@ -353,6 +358,14 @@ struct TranslationResultsView: View {
                     }
                     .padding(.vertical, 16)
                     .padding(.horizontal, 24)
+                }
+                .onChange(of: appState.currentTranslation?.timestamp) { _, timestamp in
+                    guard timestamp != nil else { return }
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo("current", anchor: .top)
+                        }
+                    }
                 }
             }
         }

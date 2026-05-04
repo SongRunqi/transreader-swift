@@ -588,6 +588,7 @@ final class AppState {
 
     private func enqueueTranslation(_ text: String, source: TranslationSource,
                                      sourceApp: String = "", sourceUrl: String = "") {
+        dismissWordLookup()
         var task = QueuedTask(text: text, source: source, sourceApp: sourceApp, sourceUrl: sourceUrl)
 
         // Dedup: retranslate bypasses dedup
@@ -865,6 +866,12 @@ final class AppState {
             }
             isLookingUpWord = false
         }
+    }
+
+    func dismissWordLookup() {
+        showWordPopover = false
+        currentWordLookup = nil
+        isLookingUpWord = false
     }
 
     func addWordToVocab(_ entry: DictionaryEntry) {

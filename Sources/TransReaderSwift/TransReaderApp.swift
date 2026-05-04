@@ -17,8 +17,8 @@ struct TransReaderApp: App {
             case .relaunching:    return "译🔄"
             }
         }
-        if appState.isTranslating { return "译⏳" }
-        if appState.monitorEnabled { return "译👁" }
+        if appState.isTranslating { return "译↻" }
+        if appState.monitorEnabled { return "译●" }
         return "译"
     }
 

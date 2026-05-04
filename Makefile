@@ -74,6 +74,7 @@ bundle: build ## Create .app bundle (only copies binary if changed)
 	@touch "$(OUT_DIR)/.needs-sign"
 	@mkdir -p "$(CONTENTS_DIR)/Resources"
 	@if [ -f "Resources/AppIcon.icns" ]; then cp "Resources/AppIcon.icns" "$(CONTENTS_DIR)/Resources/AppIcon.icns"; fi
+	@if [ -f "Resources/MenuBar.iconset/menubar_color_36.png" ]; then cp "Resources/MenuBar.iconset/menubar_color_36.png" "$(CONTENTS_DIR)/Resources/MenuBarIcon.png"; fi
 	@if [ ! -f "$(ENTITLEMENTS)" ]; then \
 		printf '%s\n' \
 			'<?xml version="1.0" encoding="UTF-8"?>' \
