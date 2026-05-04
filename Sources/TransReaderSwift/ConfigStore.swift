@@ -3,6 +3,8 @@ import Foundation
 @Observable
 final class ConfigStore: @unchecked Sendable {
     private(set) var config: AppConfig
+    @ObservationIgnored
+    private var latestConfig: AppConfig
     private let configURL: URL
     private let queue = DispatchQueue(label: "com.transreader.config", qos: .userInitiated)
     
@@ -14,6 +16,7 @@ final class ConfigStore: @unchecked Sendable {
         // Ensure directory exists
         try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
         
+        let initialConfig: AppConfig
         // Load or create default, with backward compatibility
         if var loaded = Self.load(from: configURL) {
             // Migrate old excluded_apps → included_apps
@@ -25,11 +28,23 @@ final class ConfigStore: @unchecked Sendable {
                     loaded.includedApps = AppConfig.defaultIncludedApps
                 }
             }
-            self.config = loaded
+            loaded.provider = Providers.validatedId(loaded.provider)
+            // Migrate plaintext legacy API keys into Keychain, then keep the
+            // in-memory config hydrated for existing UI code paths.
+            for (provider, key) in loaded.apiKeys where !key.isEmpty {
+                KeychainStore.setAPIKey(key, for: provider)
+            }
+            loaded.apiKeys = Self.loadKeychainAPIKeys()
+            initialConfig = loaded
         } else {
-            self.config = .default
-            Self.save(config, to: configURL)
+            var defaultConfig = AppConfig.default
+            defaultConfig.apiKeys = Self.loadKeychainAPIKeys()
+            initialConfig = defaultConfig
+            Self.save(defaultConfig, to: configURL)
         }
+        self.config = initialConfig
+        self.latestConfig = initialConfig
+        Self.save(initialConfig, to: configURL)
     }
     
     private static func load(from url: URL) -> AppConfig? {
@@ -46,22 +61,28 @@ final class ConfigStore: @unchecked Sendable {
         try? data.write(to: url, options: .atomic)
     }
     
-    func update(_ modifier: @escaping (inout AppConfig) -> Void) {
-        let currentConfig = config
+    func update(_ modifier: @escaping @Sendable (inout AppConfig) -> Void) {
         queue.async { [weak self] in
             guard let self = self else { return }
-            var updated = currentConfig
+            var updated = self.latestConfig
             modifier(&updated)
-            Self.save(updated, to: self.configURL)
+            updated.provider = Providers.validatedId(updated.provider)
+            for provider in Providers.all.keys {
+                KeychainStore.setAPIKey(updated.apiKeys[provider], for: provider)
+            }
+            updated.apiKeys = Self.loadKeychainAPIKeys()
+            let snapshot = updated
+            Self.save(snapshot, to: self.configURL)
+            self.latestConfig = snapshot
             DispatchQueue.main.async {
-                self.config = updated
+                self.config = snapshot
             }
         }
     }
     
     // MARK: - Convenience Getters
-    var provider: String { config.provider }
-    var apiKey: String? { config.apiKeys[config.provider] }
+    var provider: String { Providers.validatedId(config.provider) }
+    var apiKey: String? { apiKey(for: provider) }
     var systemPrompt: String {
         if let custom = config.systemPrompt, !custom.isEmpty {
             return custom
@@ -83,7 +104,7 @@ final class ConfigStore: @unchecked Sendable {
     }
     
     func setAPIKey(_ key: String, for provider: String) {
-        update { $0.apiKeys[provider] = key }
+        update { $0.apiKeys[provider] = key.isEmpty ? nil : key }
     }
     
     func setMonitorEnabled(_ enabled: Bool) {
@@ -92,10 +113,6 @@ final class ConfigStore: @unchecked Sendable {
     
     func setMonitorInterval(_ interval: Int) {
         update { $0.monitorInterval = max(50, min(interval, 10000)) }
-    }
-    
-    func setClipboardTranslateEnabled(_ enabled: Bool) {
-        update { $0.clipboardTranslateEnabled = enabled }
     }
     
     func setSystemPrompt(_ prompt: String?) {
@@ -134,10 +151,30 @@ final class ConfigStore: @unchecked Sendable {
     var longTextThreshold: Int { config.longTextThreshold }
 
     func modelForProvider(_ providerId: String) -> String {
-        if let custom = config.customModels[providerId], !custom.isEmpty {
+        let validated = Providers.validatedId(providerId)
+        if let custom = config.customModels[validated], !custom.isEmpty {
             return custom
         }
-        return Providers.all[providerId]?.model ?? "deepseek-chat"
+        return Providers.provider(for: validated).model
+    }
+
+    func apiKey(for provider: String) -> String? {
+        let validated = Providers.validatedId(provider)
+        return KeychainStore.apiKey(for: validated) ?? config.apiKeys[validated]
+    }
+
+    func hasAPIKey(for provider: String) -> Bool {
+        !(apiKey(for: provider)?.isEmpty ?? true)
+    }
+
+    private static func loadKeychainAPIKeys() -> [String: String] {
+        var keys: [String: String] = [:]
+        for provider in Providers.all.keys {
+            if let key = KeychainStore.apiKey(for: provider), !key.isEmpty {
+                keys[provider] = key
+            }
+        }
+        return keys
     }
 }
 

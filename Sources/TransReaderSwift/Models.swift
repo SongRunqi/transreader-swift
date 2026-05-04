@@ -30,6 +30,16 @@ struct Providers {
                         baseURL: "https://api.moonshot.cn/v1",
                         model: "moonshot-v1-auto")
     ]
+
+    static let defaultId = "deepseek"
+
+    static func validatedId(_ providerId: String) -> String {
+        all[providerId] == nil ? defaultId : providerId
+    }
+
+    static func provider(for providerId: String) -> Provider {
+        all[validatedId(providerId)]!
+    }
 }
 
 // MARK: - Translation Models
@@ -228,7 +238,6 @@ struct AppConfig: Codable, Sendable {
     var port: Int
     var monitorEnabled: Bool
     var monitorInterval: Int
-    var clipboardTranslateEnabled: Bool
     var systemPrompt: String?
     var shortcuts: [String: String]
     var vocabFile: String
@@ -251,7 +260,6 @@ struct AppConfig: Codable, Sendable {
         case apiKeys = "api_keys"
         case monitorEnabled = "monitor_enabled"
         case monitorInterval = "monitor_interval"
-        case clipboardTranslateEnabled = "clipboard_translate_enabled"
         case systemPrompt = "system_prompt"
         case vocabFile = "vocab_file"
         case includedApps = "included_apps"
@@ -277,7 +285,6 @@ struct AppConfig: Codable, Sendable {
         port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 15487
         monitorEnabled = try c.decodeIfPresent(Bool.self, forKey: .monitorEnabled) ?? false
         monitorInterval = try c.decodeIfPresent(Int.self, forKey: .monitorInterval) ?? 1000
-        clipboardTranslateEnabled = try c.decodeIfPresent(Bool.self, forKey: .clipboardTranslateEnabled) ?? false
         systemPrompt = try c.decodeIfPresent(String.self, forKey: .systemPrompt)
         shortcuts = try c.decodeIfPresent([String: String].self, forKey: .shortcuts) ?? AppConfig.default.shortcuts
         vocabFile = try c.decodeIfPresent(String.self, forKey: .vocabFile) ?? "~/.transreader/vocab.canvas"
@@ -296,9 +303,35 @@ struct AppConfig: Codable, Sendable {
         longOperationThresholdSeconds = try c.decodeIfPresent(Int.self, forKey: .longOperationThresholdSeconds) ?? 10
     }
 
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(provider, forKey: .provider)
+        // API keys are decoded for backward compatibility, then migrated to Keychain.
+        // Do not write them back to config.json.
+        try c.encode(port, forKey: .port)
+        try c.encode(monitorEnabled, forKey: .monitorEnabled)
+        try c.encode(monitorInterval, forKey: .monitorInterval)
+        try c.encodeIfPresent(systemPrompt, forKey: .systemPrompt)
+        try c.encode(shortcuts, forKey: .shortcuts)
+        try c.encode(vocabFile, forKey: .vocabFile)
+        try c.encode(includedApps, forKey: .includedApps)
+        try c.encode(excludedUrls, forKey: .excludedUrls)
+        try c.encode(requestTimeout, forKey: .requestTimeout)
+        try c.encode(displayMode, forKey: .displayMode)
+        try c.encode(longTextThreshold, forKey: .longTextThreshold)
+        try c.encode(customModels, forKey: .customModels)
+        try c.encode(debugMode, forKey: .debugMode)
+        try c.encode(maxConcurrentTranslations, forKey: .maxConcurrentTranslations)
+        try c.encode(notificationsEnabled, forKey: .notificationsEnabled)
+        try c.encode(notifyOnTranslationDone, forKey: .notifyOnTranslationDone)
+        try c.encode(notifyOnError, forKey: .notifyOnError)
+        try c.encode(notifyOnLongOperation, forKey: .notifyOnLongOperation)
+        try c.encode(longOperationThresholdSeconds, forKey: .longOperationThresholdSeconds)
+    }
+
     // Memberwise init for programmatic construction
     init(provider: String, apiKeys: [String: String], port: Int, monitorEnabled: Bool,
-         monitorInterval: Int, clipboardTranslateEnabled: Bool, systemPrompt: String?,
+         monitorInterval: Int, systemPrompt: String?,
          shortcuts: [String: String], vocabFile: String, includedApps: [String],
          excludedUrls: [String], requestTimeout: Int, displayMode: DisplayMode,
          longTextThreshold: Int, customModels: [String: String], debugMode: Bool,
@@ -308,7 +341,7 @@ struct AppConfig: Codable, Sendable {
          longOperationThresholdSeconds: Int = 10) {
         self.provider = provider; self.apiKeys = apiKeys; self.port = port
         self.monitorEnabled = monitorEnabled; self.monitorInterval = monitorInterval
-        self.clipboardTranslateEnabled = clipboardTranslateEnabled; self.systemPrompt = systemPrompt
+        self.systemPrompt = systemPrompt
         self.shortcuts = shortcuts; self.vocabFile = vocabFile; self.includedApps = includedApps
         self.excludedUrls = excludedUrls; self.requestTimeout = requestTimeout
         self.displayMode = displayMode; self.longTextThreshold = longTextThreshold
@@ -334,7 +367,6 @@ struct AppConfig: Codable, Sendable {
         port: 15487,
         monitorEnabled: false,
         monitorInterval: 1000,
-        clipboardTranslateEnabled: false,
         systemPrompt: nil,
         shortcuts: [
             "capture_translate": "option+cmd+t",

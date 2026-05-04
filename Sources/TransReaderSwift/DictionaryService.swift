@@ -73,6 +73,22 @@ actor DictionaryService {
             }
         }
     }
+
+    enum LookupError: LocalizedError {
+        case noAPIKey
+        case requestFailed
+        case invalidResponse
+        case invalidContent
+
+        var errorDescription: String? {
+            switch self {
+            case .noAPIKey: return "未配置 API Key"
+            case .requestFailed: return "API 请求失败"
+            case .invalidResponse: return "API 返回格式无效"
+            case .invalidContent: return "无法解析 AI 返回的词典数据"
+            }
+        }
+    }
     
     func lookupWord(_ word: String) async throws -> DictionaryEntry {
         // Try Youdao dictionary first
@@ -183,13 +199,10 @@ actor DictionaryService {
     }
     
     private func lookupWithAI(_ word: String) async throws -> DictionaryEntry {
-        guard let apiKey = configStore.apiKey else {
-            throw NSError(domain: "DictionaryService", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "未配置 API Key"
-            ])
-        }
+        guard let apiKey = configStore.apiKey else { throw LookupError.noAPIKey }
         
-        let provider = Providers.all[configStore.provider]!
+        let providerId = configStore.provider
+        let provider = Providers.provider(for: providerId)
         let url = URL(string: "\(provider.baseURL)/chat/completions")!
         
         var request = URLRequest(url: url, timeoutInterval: 30)
@@ -211,7 +224,7 @@ actor DictionaryService {
         """
         
         let payload: [String: Any] = [
-            "model": configStore.modelForProvider(configStore.provider),
+            "model": configStore.modelForProvider(providerId),
             "temperature": 0.3,
             "messages": [
                 ["role": "user", "content": prompt]
@@ -223,15 +236,16 @@ actor DictionaryService {
         
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            throw NSError(domain: "DictionaryService", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "API 请求失败"
-            ])
+            throw LookupError.requestFailed
         }
         
-        let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
-        let choices = json["choices"] as! [[String: Any]]
-        let message = choices[0]["message"] as! [String: Any]
-        var content = message["content"] as! String
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let message = firstChoice["message"] as? [String: Any],
+              var content = message["content"] as? String else {
+            throw LookupError.invalidResponse
+        }
         
         // Remove markdown code blocks if present
         if content.hasPrefix("```") {
@@ -242,9 +256,7 @@ actor DictionaryService {
         
         guard let contentData = content.data(using: .utf8),
               let entryJSON = try? JSONSerialization.jsonObject(with: contentData) as? [String: Any] else {
-            throw NSError(domain: "DictionaryService", code: 3, userInfo: [
-                NSLocalizedDescriptionKey: "无法解析 AI 返回的词典数据"
-            ])
+            throw LookupError.invalidContent
         }
         
         return DictionaryEntry(

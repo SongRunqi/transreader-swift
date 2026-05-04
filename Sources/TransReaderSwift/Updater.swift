@@ -1,11 +1,13 @@
 import Foundation
 import AppKit
+import CryptoKit
 
 // MARK: - Update Types
 
 struct UpdateInfo: Sendable {
     let version: String
     let downloadURL: URL
+    let checksumURL: URL
 }
 
 enum UpdateStage: Sendable, Equatable {
@@ -24,10 +26,12 @@ private struct GitHubRelease: Decodable {
     struct Asset: Decodable {
         let name: String
         let browserDownloadUrl: String
+        let size: Int64?
 
         enum CodingKeys: String, CodingKey {
             case name
             case browserDownloadUrl = "browser_download_url"
+            case size
         }
     }
 
@@ -83,15 +87,26 @@ actor Updater {
             return nil
         }
 
-        // Find .zip asset
+        // Find .zip asset and its SHA-256 sidecar
         guard let zipAsset = release.assets.first(where: { $0.name.hasSuffix(".zip") }),
               let downloadURL = URL(string: zipAsset.browserDownloadUrl) else {
             appLog("[Update] No .zip asset found in release \(release.tagName)")
             return nil
         }
 
+        let checksumNames = [
+            "\(zipAsset.name).sha256",
+            "\(zipAsset.name).sha256sum",
+            "\(zipAsset.name).sha256.txt",
+            zipAsset.name.replacingOccurrences(of: ".zip", with: ".sha256")
+        ]
+        guard let checksumAsset = release.assets.first(where: { checksumNames.contains($0.name) }),
+              let checksumURL = URL(string: checksumAsset.browserDownloadUrl) else {
+            throw UpdateError.missingChecksum
+        }
+
         appLog("[Update] New version available: \(latestVersion)")
-        return UpdateInfo(version: latestVersion, downloadURL: downloadURL)
+        return UpdateInfo(version: latestVersion, downloadURL: downloadURL, checksumURL: checksumURL)
     }
 
     // MARK: - Download and Install
@@ -112,7 +127,12 @@ actor Updater {
         // 2. Download ZIP
         onProgress(.downloading(progress: 0))
         let zipPath = tempDir.appendingPathComponent("update.zip")
-        try await downloadFile(from: info.downloadURL, to: zipPath, onProgress: onProgress)
+        let expectedSHA256 = try await downloadChecksum(from: info.checksumURL)
+        let actualSHA256 = try await downloadFile(from: info.downloadURL, to: zipPath, onProgress: onProgress)
+        guard actualSHA256.caseInsensitiveCompare(expectedSHA256) == .orderedSame else {
+            throw UpdateError.checksumMismatch
+        }
+        appLog("[Update] Checksum verified")
 
         // 3. Extract with ditto (preserves signatures, symlinks, xattrs)
         onProgress(.extracting)
@@ -127,6 +147,7 @@ actor Updater {
             throw UpdateError.noAppInZip
         }
         let newAppPath = extractDir.appendingPathComponent(appName)
+        try verifyBundle(at: newAppPath.path, expectedVersion: info.version)
 
         // 5. Atomic replace: rename current → backup, ditto new → install, restore on failure
         onProgress(.installing)
@@ -145,15 +166,11 @@ actor Updater {
 
             // Copy new app to install location using ditto (preserves code signature)
             try runProcess("/usr/bin/ditto", arguments: [newAppPath.path, installPath])
+            try verifyBundle(at: installPath, expectedVersion: info.version)
             appLog("[Update] Installed new version to \(installPath)")
 
             // Clear quarantine xattr (non-fatal if it fails)
             QuarantineHelper.removeQuarantine(at: installPath)
-
-            // Verify signature integrity (log-only, don't re-sign to preserve AX permissions)
-            if !QuarantineHelper.verifySignature(at: installPath) {
-                appLog("[Update] Warning: signature verification failed after install")
-            }
 
             // Remove backup
             try? FileManager.default.removeItem(at: backupURL)
@@ -206,8 +223,9 @@ actor Updater {
     }
 
     /// Download file with progress reporting
+    /// Returns the SHA-256 digest of the downloaded file.
     private func downloadFile(from url: URL, to destination: URL,
-                              onProgress: @Sendable (UpdateStage) -> Void) async throws {
+                              onProgress: @Sendable (UpdateStage) -> Void) async throws -> String {
         let (asyncBytes, response) = try await URLSession.shared.bytes(for: URLRequest(url: url))
 
         guard let httpResponse = response as? HTTPURLResponse,
@@ -216,13 +234,34 @@ actor Updater {
         }
 
         let totalBytes = httpResponse.expectedContentLength
+        let maxBytes: Int64 = 250 * 1024 * 1024
+        if totalBytes > maxBytes {
+            throw UpdateError.downloadTooLarge
+        }
         var downloadedBytes: Int64 = 0
+        FileManager.default.createFile(atPath: destination.path, contents: nil)
+        guard let file = try? FileHandle(forWritingTo: destination) else {
+            throw UpdateError.downloadFailed
+        }
+        defer { try? file.close() }
+
+        var hasher = SHA256()
         var buffer = Data()
-        buffer.reserveCapacity(totalBytes > 0 ? Int(totalBytes) : 10_000_000)
+        buffer.reserveCapacity(64 * 1024)
 
         for try await byte in asyncBytes {
+            try Task.checkCancellation()
             buffer.append(byte)
             downloadedBytes += 1
+            if downloadedBytes > maxBytes {
+                throw UpdateError.downloadTooLarge
+            }
+
+            if buffer.count >= 64 * 1024 {
+                try file.write(contentsOf: buffer)
+                hasher.update(data: buffer)
+                buffer.removeAll(keepingCapacity: true)
+            }
 
             // Report progress every 64KB
             if downloadedBytes % (64 * 1024) == 0 {
@@ -231,9 +270,50 @@ actor Updater {
             }
         }
 
-        try buffer.write(to: destination)
+        if !buffer.isEmpty {
+            try file.write(contentsOf: buffer)
+            hasher.update(data: buffer)
+        }
         onProgress(.downloading(progress: 1.0))
         appLog("[Update] Downloaded \(downloadedBytes) bytes")
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func downloadChecksum(from url: URL) async throws -> String {
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode),
+              data.count < 4096,
+              let text = String(data: data, encoding: .utf8) else {
+            throw UpdateError.checksumDownloadFailed
+        }
+        guard let checksum = text
+            .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" })
+            .first(where: { $0.count == 64 && $0.allSatisfy(\.isHexDigit) }) else {
+            throw UpdateError.invalidChecksum
+        }
+        return String(checksum)
+    }
+
+    private func verifyBundle(at appPath: String, expectedVersion: String) throws {
+        guard QuarantineHelper.verifySignature(at: appPath) else {
+            throw UpdateError.signatureVerificationFailed
+        }
+        let infoURL = URL(fileURLWithPath: appPath)
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Info.plist")
+        guard let info = NSDictionary(contentsOf: infoURL) as? [String: Any],
+              info["CFBundleIdentifier"] as? String == Bundle.main.bundleIdentifier,
+              info["CFBundleExecutable"] as? String == Bundle.main.infoDictionary?["CFBundleExecutable"] as? String,
+              info["CFBundleShortVersionString"] as? String == expectedVersion else {
+            throw UpdateError.bundleVerificationFailed
+        }
+
+        let expectedTeam = QuarantineHelper.teamIdentifier(at: Bundle.main.bundlePath)
+        let actualTeam = QuarantineHelper.teamIdentifier(at: appPath)
+        if let expectedTeam, expectedTeam != actualTeam {
+            throw UpdateError.bundleVerificationFailed
+        }
     }
 
     /// Run an external process and throw on failure
@@ -264,6 +344,13 @@ actor Updater {
 enum UpdateError: LocalizedError {
     case noAppInZip
     case downloadFailed
+    case downloadTooLarge
+    case missingChecksum
+    case checksumDownloadFailed
+    case invalidChecksum
+    case checksumMismatch
+    case signatureVerificationFailed
+    case bundleVerificationFailed
     case installFailed(String)
     case processFailed(String, Int32, String)
 
@@ -273,6 +360,20 @@ enum UpdateError: LocalizedError {
             return "更新包中未找到 .app 文件"
         case .downloadFailed:
             return "下载更新失败"
+        case .downloadTooLarge:
+            return "更新包过大，已中止"
+        case .missingChecksum:
+            return "更新缺少 SHA-256 校验文件"
+        case .checksumDownloadFailed:
+            return "下载更新校验文件失败"
+        case .invalidChecksum:
+            return "更新校验文件格式无效"
+        case .checksumMismatch:
+            return "更新包 SHA-256 校验失败"
+        case .signatureVerificationFailed:
+            return "更新包签名校验失败"
+        case .bundleVerificationFailed:
+            return "更新包应用信息校验失败"
         case .installFailed(let reason):
             return "安装更新失败: \(reason)"
         case .processFailed(let cmd, let code, let output):

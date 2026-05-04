@@ -170,6 +170,8 @@ struct TranslationBlockView: View {
         )
         .shadow(color: Color.black.opacity(0.04), radius: 8, x: 0, y: 2)
         .padding(.bottom, 16)
+        .onAppear { MemoryDiag.bump(.translationBlock, +1) }
+        .onDisappear { MemoryDiag.bump(.translationBlock, -1) }
     }
 }
 
@@ -219,10 +221,12 @@ struct SentenceBlockView: View {
             }
         }
         .onAppear {
+            MemoryDiag.bump(.sentenceBlock, +1)
             if sentence.isPartial && analysisHasContent {
                 showAnalysis = true
             }
         }
+        .onDisappear { MemoryDiag.bump(.sentenceBlock, -1) }
     }
 
     // MARK: - Read Mode: en → zh → [collapsible: meta → tree → tip]
@@ -243,9 +247,11 @@ struct SentenceBlockView: View {
         if hasContent {
             VStack(alignment: .leading, spacing: 0) {
                 Button {
+                    MemoryDiag.snapshot("before showAnalysis.toggle (\(showAnalysis ? "collapse" : "expand"))")
                     withAnimation(.easeInOut(duration: 0.15)) {
                         showAnalysis.toggle()
                     }
+                    MemoryDiag.snapshot("after  showAnalysis.toggle")
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: showAnalysis ? "chevron.down" : "chevron.right")
@@ -372,9 +378,14 @@ class ClickableEnglishNSView: NSView {
         layoutManager.addTextContainer(textContainer)
         textStorage.addLayoutManager(layoutManager)
         textContainer.lineFragmentPadding = 0
+        Task { @MainActor in MemoryDiag.bump(.clickableEnglish, +1) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        Task { @MainActor in MemoryDiag.bump(.clickableEnglish, -1) }
+    }
 
     func configure(text: String, font: NSFont, textColor: NSColor, onWordLookup: ((String) -> Void)?) {
         self.baseFont = font
@@ -527,6 +538,8 @@ struct SyntaxTreeNode: View {
                 leafView
             }
         }
+        .onAppear { MemoryDiag.bump(.syntaxNode, +1) }
+        .onDisappear { MemoryDiag.bump(.syntaxNode, -1) }
     }
 
     // MARK: - Leaf node: [role] en zh
@@ -551,9 +564,11 @@ struct SyntaxTreeNode: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header row (clickable)
             Button {
+                MemoryDiag.snapshot("before expanded.toggle depth=\(depth) role=\(chunk.role) (\(expanded ? "collapse" : "expand"))")
                 withAnimation(.easeInOut(duration: 0.15)) {
                     expanded.toggle()
                 }
+                MemoryDiag.snapshot("after  expanded.toggle depth=\(depth)")
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     // Toggle indicator

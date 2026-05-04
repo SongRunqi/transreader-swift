@@ -1,6 +1,70 @@
 import Foundation
 import SwiftUI
 import ApplicationServices
+import Darwin
+
+// MARK: - Memory Diagnostics
+//
+// Temporary instrumentation to track the grammar-tree memory spike bug.
+// Reports process resident memory (MB) and live-instance counts for the
+// suspect view components. Call sites:
+//   - Periodic: MemoryDiag.startPeriodic() spawns a 2s timer
+//   - Events:   MemoryDiag.snapshot("label") logs a labeled point
+//   - Counters: MemoryDiag.bump(.syntaxNode, +1) from view onAppear/onDisappear
+
+enum MemoryDiagComponent: String, CaseIterable {
+    case translationBlock = "TranslationBlock"
+    case sentenceBlock = "SentenceBlock"
+    case syntaxNode = "SyntaxTreeNode"
+    case clickableEnglish = "ClickableEnglishNSView"
+}
+
+enum MemoryDiag {
+    // Atomic-ish counters; touched from @MainActor view callbacks so no lock needed
+    nonisolated(unsafe) static var counts: [MemoryDiagComponent: Int] = [:]
+    nonisolated(unsafe) static var peakMB: Double = 0
+    nonisolated(unsafe) static var baselineMB: Double = 0
+
+    static func currentMemoryMB() -> Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { ptr -> kern_return_t in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPtr in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), reboundPtr, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return Double(info.resident_size) / 1024.0 / 1024.0
+    }
+
+    @MainActor
+    static func bump(_ component: MemoryDiagComponent, _ delta: Int) {
+        counts[component, default: 0] += delta
+    }
+
+    static func snapshot(_ label: String) {
+        let mb = currentMemoryMB()
+        if mb > peakMB { peakMB = mb }
+        let delta = mb - baselineMB
+        let sign = delta >= 0 ? "+" : ""
+        let countStr = MemoryDiagComponent.allCases
+            .map { "\($0.rawValue)=\(counts[$0] ?? 0)" }
+            .joined(separator: " ")
+        appLog("[Mem] \(label) rss=\(String(format: "%.1f", mb))MB (\(sign)\(String(format: "%.1f", delta)) peak=\(String(format: "%.1f", peakMB))) | \(countStr)")
+    }
+
+    static func startPeriodic() {
+        baselineMB = currentMemoryMB()
+        peakMB = baselineMB
+        appLog("[Mem] Baseline set: \(String(format: "%.1f", baselineMB))MB")
+        Task.detached {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                snapshot("tick")
+            }
+        }
+    }
+}
 
 // Global logger — writes to ~/.transreader/app.log + stderr
 func appLog(_ msg: String) {
@@ -11,14 +75,25 @@ func appLog(_ msg: String) {
     // log file (always works)
     let logPath = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".transreader").appendingPathComponent("app.log")
+    let maxLogBytes: UInt64 = 5 * 1024 * 1024
     if !FileManager.default.fileExists(atPath: logPath.path) {
         FileManager.default.createFile(atPath: logPath.path, contents: nil)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logPath.path)
+    } else if let size = (try? FileManager.default.attributesOfItem(atPath: logPath.path))?[.size] as? UInt64,
+              size > maxLogBytes {
+        try? FileManager.default.removeItem(at: logPath)
+        FileManager.default.createFile(atPath: logPath.path, contents: nil)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logPath.path)
     }
     if let fh = FileHandle(forWritingAtPath: logPath.path) {
         fh.seekToEndOfFile()
         fh.write(data)
         fh.closeFile()
     }
+}
+
+func appLogTextSummary(_ text: String) -> String {
+    "\(text.count) chars"
 }
 
 @Observable
@@ -124,29 +199,35 @@ final class AppState {
             }
         }
 
-        self.selectionMonitor = SelectionMonitor(
-            callback: callback,
-            pollInterval: Double(configStore.config.monitorInterval) / 1000.0,
-            includedApps: configStore.config.includedApps,
-            excludedUrls: configStore.config.excludedUrls,
-            clipboardTranslateEnabled: configStore.config.clipboardTranslateEnabled
-        )
-
-        // Check accessibility permission
-        checkAccessibilityPermission()
-
-        // Start if configured
-        if configStore.config.monitorEnabled {
-            Task {
-                await startMonitor()
+        // Suppress callback: cancel any in-flight/queued task matching this text.
+        // Fires when the user presses Cmd+C within 300ms of a selection —
+        // signalling "I intended to copy, not translate".
+        let suppressCallback: @Sendable (String) -> Void = { [weak self] text in
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.cancelTasksMatching(text: text)
             }
         }
+
+        self.selectionMonitor = SelectionMonitor(
+            callback: callback,
+            onSuppress: suppressCallback,
+            pollInterval: Double(configStore.config.monitorInterval) / 1000.0,
+            includedApps: configStore.config.includedApps,
+            excludedUrls: configStore.config.excludedUrls
+        )
+
+        monitorEnabled = false
 
         // Background update check (bundle mode only)
         if Updater.isBundle {
             Task {
                 await startupUpdateCheck()
             }
+        }
+
+        if configStore.config.debugMode {
+            MemoryDiag.startPeriodic()
         }
     }
 
@@ -259,7 +340,6 @@ final class AppState {
             await monitor.updateInterval(Double(configStore.config.monitorInterval) / 1000.0)
             await monitor.updateIncludedApps(configStore.config.includedApps)
             await monitor.updateExcludedUrls(configStore.config.excludedUrls)
-            await monitor.updateClipboardTranslate(configStore.config.clipboardTranslateEnabled)
         }
     }
 
@@ -401,7 +481,7 @@ final class AppState {
         Task {
             await withTaskGroup(of: LatencyResult.self) { group in
                 for (id, provider) in Providers.all {
-                    guard let apiKey = configStore.config.apiKeys[id], !apiKey.isEmpty else {
+                    guard let apiKey = configStore.apiKey(for: id), !apiKey.isEmpty else {
                         continue
                     }
                     let model = configStore.modelForProvider(id)
@@ -463,6 +543,13 @@ final class AppState {
         translateWithSource(text, source: source, sourceApp: "", sourceUrl: "")
     }
 
+    func translateFromPopClip(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        translateWithSource(trimmed, source: .selection, sourceApp: "PopClip", sourceUrl: "")
+        showWindowWithoutActivation()
+    }
+
     func translateWithSource(_ text: String, source: TranslationSource, sourceApp: String, sourceUrl: String) {
         // Long text threshold check
         let threshold = configStore.config.longTextThreshold
@@ -506,6 +593,18 @@ final class AppState {
         // Dedup: retranslate bypasses dedup
         if source != .retranslate {
             let key = task.dedupKey
+            let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Hard dedup: same text as the currently-visible translation, and
+            // that translation completed successfully (not cancelled). No time
+            // window — as long as the user is still looking at the previous
+            // result for this exact text, don't re-run it.
+            if let current = currentTranslation,
+               !current.wasCancelled,
+               current.sourceText.trimmingCharacters(in: .whitespacesAndNewlines) == normalizedText {
+                appLog("[Translate] Dedup: same as last completed translation, skipping")
+                return
+            }
 
             // Check queue for same key already queued or running
             if translationQueue.contains(where: { ($0.status == .queued || $0.status == .running) && $0.dedupKey == key }) {
@@ -581,6 +680,25 @@ final class AppState {
         updateIsTranslating()
     }
 
+    /// Cancel any queued/running task whose source text matches `text`.
+    /// Used by the Cmd+C suppression window — user pressed Cmd+C within 300ms
+    /// of a selection, signalling "copy intent, not translate intent".
+    func cancelTasksMatching(text: String) {
+        let matchingIds = translationQueue
+            .filter { $0.text == text && ($0.status == .queued || $0.status == .running) }
+            .map { $0.id }
+        guard !matchingIds.isEmpty else { return }
+        appLog("[Translate] Suppression cancelling \(matchingIds.count) task(s) for \(appLogTextSummary(text))")
+        for id in matchingIds {
+            cancelTask(id: id)
+        }
+        // Also clear the currently-displayed translation if it matches, so the
+        // user doesn't see a half-streamed block they didn't want.
+        if currentTranslation?.sourceText == text {
+            currentTranslation = nil
+        }
+    }
+
     /// Legacy compat — called from header cancel button
     func cancelCurrentTranslation() {
         cancelAllTasks()
@@ -609,7 +727,7 @@ final class AppState {
 
     private func executeTranslation(_ task: QueuedTask) async {
         error = nil
-        appLog("[Translate] Starting: \(task.text.prefix(60))...")
+        appLog("[Translate] Starting \(appLogTextSummary(task.text))")
 
         let startTime = Date()
         var sentences: [Sentence] = []
@@ -682,14 +800,20 @@ final class AppState {
         } catch {
             let isCancellation = error is CancellationError || "\(error)".contains("cancelled")
             if isCancellation {
-                appLog("[Translate] Cancelled with \(pendingSentences.count) partial sentences: \(task.text.prefix(40))...")
-                // Preserve partial results on cancel — don't persist to history/SQLite
+                appLog("[Translate] Cancelled with \(pendingSentences.count) partial sentences for \(appLogTextSummary(task.text))")
+                // Preserve partial results on cancel — don't persist to history/SQLite.
+                // Clear isPartial so the loading spinner stops.
                 if !pendingSentences.isEmpty {
+                    let finalSentences = pendingSentences.map { s -> Sentence in
+                        var copy = s
+                        copy.isPartial = false
+                        return copy
+                    }
                     let elapsed = Int(Date().timeIntervalSince(startTime) * 1000)
                     currentTranslation = TranslationResult(
                         timestamp: startTime,
                         sourceText: task.text,
-                        sentences: pendingSentences,
+                        sentences: finalSentences,
                         source: task.source,
                         elapsedMs: elapsed,
                         sourceApp: task.sourceApp,
@@ -802,7 +926,8 @@ final class AppState {
 
             await MainActor.run { self.enhanceProgress = "正在生成..." }
 
-            let provider = Providers.all[configStore.provider]!
+            let providerId = configStore.provider
+            let provider = Providers.provider(for: providerId)
             let url = URL(string: "\(provider.baseURL)/chat/completions")!
 
             var request = URLRequest(url: url, timeoutInterval: configStore.requestTimeout)
@@ -811,7 +936,7 @@ final class AppState {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
             let systemPrompt = isChinese ? Constants.zhEnSystemPrompt : Constants.grammarFixSystemPrompt
-            let model = configStore.modelForProvider(configStore.provider)
+            let model = configStore.modelForProvider(providerId)
             let payload: [String: Any] = [
                 "model": model,
                 "temperature": 0.3,

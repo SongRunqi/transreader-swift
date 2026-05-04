@@ -5,54 +5,48 @@ import CoreGraphics
 
 actor SelectionMonitor {
     private let callback: @Sendable (String, Bool, String, String) -> Void  // text, isWord, sourceApp, sourceUrl
+    private let onSuppress: @Sendable (String) -> Void  // cancel translation for this text
     private var pollTask: Task<Void, Never>?
     private var isRunning = false
 
     private var pollInterval: TimeInterval
     private var includedApps: [String]
     private var excludedUrls: [String]
-    private var clipboardTranslateEnabled: Bool
 
     private var firedText = ""
     private var lastFocusedApp = ""
-    private var lastClipboardChangeCount = 0
     private var previousMouseDown = false
     private var appJustSwitched = false
 
-    // Clipboard hardening flags
-    private var suppressClipboardWatch = false
-    private var lastClipboardFireTime: Date = .distantPast
-
-    // Gesture-based mouse tracking
-    private var mouseDownTime: TimeInterval = 0
-    private var lastReleaseTime: TimeInterval = 0
-    private let dragThreshold: TimeInterval = 0.3
+    // Gesture-based mouse tracking (drag distance + double-click)
+    private let dragDistanceThreshold: CGFloat = 5.0
     private let doubleClickThreshold: TimeInterval = 0.5
 
-    // Cmd+C suppression window (300ms)
+    // Cmd+C suppression: if user copies (Cmd+C) the same text that was just
+    // selected and fired for translation, cancel the translation. No time window
+    // — suppression stays active until (a) user copies that text, (b) a new
+    // selection fires, or (c) a different clipboard change occurs.
     private var pendingText: String?
-    private var pendingIsWord = false
-    private var pendingSourceApp = ""
-    private var pendingSourceUrl = ""
-    private var pendingDeadline: Date?
     private var pendingClipboardCount = 0
+    // Extra guard: text that was just Cmd+C-suppressed. Blocks re-fire even if
+    // firedText is bypassed by AX whitespace jitter. Cleared on next gesture.
+    private var suppressedText: String?
 
     // Word vs sentence pattern
     private let wordPattern = try! NSRegularExpression(pattern: "^[a-zA-Z][a-zA-Z'-]{0,38}$")
 
     init(
         callback: @escaping @Sendable (String, Bool, String, String) -> Void,
+        onSuppress: @escaping @Sendable (String) -> Void = { _ in },
         pollInterval: TimeInterval = 1.0,
         includedApps: [String] = [],
-        excludedUrls: [String] = [],
-        clipboardTranslateEnabled: Bool = false
+        excludedUrls: [String] = []
     ) {
         self.callback = callback
+        self.onSuppress = onSuppress
         self.pollInterval = pollInterval
         self.includedApps = includedApps
         self.excludedUrls = excludedUrls
-        self.clipboardTranslateEnabled = clipboardTranslateEnabled
-        self.lastClipboardChangeCount = NSPasteboard.general.changeCount
     }
 
     func start() {
@@ -94,10 +88,6 @@ actor SelectionMonitor {
         self.excludedUrls = urls
     }
 
-    func updateClipboardTranslate(_ enabled: Bool) {
-        self.clipboardTranslateEnabled = enabled
-    }
-
     // MARK: - Fast Mouse Watcher (20ms, like Python)
 
     private var mouseWatcherTask: Task<Void, Never>?
@@ -106,22 +96,36 @@ actor SelectionMonitor {
     private func startMouseWatcher() {
         mouseWatcherTask = Task { [weak self] in
             var prevDown = false
-            var downTime: TimeInterval = 0
+            var downLocation: CGPoint = .zero
             var lastRelease: TimeInterval = 0
-            let dragThreshold: TimeInterval = 0.3
+            let dragDistance: CGFloat = 5.0
             let dblClickThreshold: TimeInterval = 0.5
 
             while !Task.isCancelled {
                 guard let self = self, await self.isRunning else { break }
+
+                // Fast-tick suppression check so Cmd+C cancellation is near-instant
+                // (rather than waiting for the slow poll loop, which is up to 1s).
+                await self.checkPendingSuppression()
+
                 let down = CGEventSource.buttonState(.combinedSessionState, button: .left)
 
                 if down && !prevDown {
-                    downTime = ProcessInfo.processInfo.systemUptime
+                    // Capture mouse location at press time
+                    downLocation = CGEvent(source: nil)?.location ?? .zero
                 }
                 if prevDown && !down {
                     let now = ProcessInfo.processInfo.systemUptime
-                    let held = now - downTime
-                    if held >= dragThreshold || (now - lastRelease) <= dblClickThreshold {
+                    let upLocation = CGEvent(source: nil)?.location ?? .zero
+                    let dx = upLocation.x - downLocation.x
+                    let dy = upLocation.y - downLocation.y
+                    let distance = sqrt(dx * dx + dy * dy)
+                    let isDrag = distance >= dragDistance
+                    let isDoubleClick = (now - lastRelease) <= dblClickThreshold
+                    // Only count as a "selection gesture" if user actually dragged
+                    // (picked text) or double-clicked (selected word). A mere
+                    // long-press on a button is not a selection.
+                    if isDrag || isDoubleClick {
                         await self.setGestureMouseReleased()
                     }
                     lastRelease = now
@@ -135,6 +139,7 @@ actor SelectionMonitor {
     private func setGestureMouseReleased() {
         gestureMouseReleased = true
         firedText = ""
+        suppressedText = nil
     }
 
     private func consumeGestureMouseReleased() -> Bool {
@@ -164,50 +169,38 @@ actor SelectionMonitor {
         return CGEventSource.buttonState(.combinedSessionState, button: .left)
     }
 
-    // MARK: - Cmd+C Suppression Window
+    // MARK: - Cmd+C Suppression
 
     private func checkPendingSuppression() {
-        guard pendingDeadline != nil, pendingText != nil else { return }
+        guard let pending = pendingText else { return }
 
-        // Check if clipboard changed during the suppression window → Cmd+C detected
         let currentCount = NSPasteboard.general.changeCount
-        if currentCount != pendingClipboardCount {
-            // User pressed Cmd+C within 300ms → they want to copy, not translate
-            appLog("[Monitor] Cmd+C detected, suppressing translation")
-            lastClipboardChangeCount = currentCount
-            clearPending()
-            return
-        }
+        guard currentCount != pendingClipboardCount else { return }
 
-        // Deadline passed without Cmd+C → translation proceeds (already fired)
-        if let deadline = pendingDeadline, Date() >= deadline {
-            clearPending()
-        }
-    }
+        let clipText = NSPasteboard.general.string(forType: .string) ?? ""
+        appLog("[Monitor] Suppression: clipboard changed \(pendingClipboardCount)→\(currentCount), pending=\(appLogTextSummary(pending)), clip=\(appLogTextSummary(clipText))")
 
-    private func clearPending() {
+        suppressedText = pending
+        onSuppress(pending)
+
         pendingText = nil
-        pendingDeadline = nil
-        pendingIsWord = false
-        pendingSourceApp = ""
-        pendingSourceUrl = ""
+        pendingClipboardCount = currentCount
     }
 
-    private func handleText(_ text: String, sourceApp: String, sourceUrl: String, isFromClipboard: Bool = false) {
+    private func handleText(_ text: String, sourceApp: String, sourceUrl: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Skip empty, too short, or already fired
+        // Skip empty, too short, already fired, or just suppressed by Cmd+C
         guard !trimmed.isEmpty,
               trimmed.count >= 2,
-              trimmed != firedText else {
+              trimmed != firedText,
+              trimmed != suppressedText else {
             return
         }
 
-        // Still selecting — skip (not applicable for clipboard)
-        if !isFromClipboard {
-            guard !isMouseDown() else {
-                return
-            }
+        // Still selecting — skip
+        guard !isMouseDown() else {
+            return
         }
 
         // Skip URLs
@@ -216,13 +209,11 @@ actor SelectionMonitor {
             return
         }
 
-        // English detection: >50% ASCII letters — skip for clipboard (supports all languages)
-        if !isFromClipboard {
-            let asciiLetters = trimmed.filter { $0.isASCII && $0.isLetter }.count
-            let ratio = Double(asciiLetters) / Double(max(trimmed.count, 1))
-            guard ratio > 0.5 else {
-                return
-            }
+        // English detection: >50% ASCII letters
+        let asciiLetters = trimmed.filter { $0.isASCII && $0.isLetter }.count
+        let ratio = Double(asciiLetters) / Double(max(trimmed.count, 1))
+        guard ratio > 0.5 else {
+            return
         }
 
         // Determine if it's a single word
@@ -232,18 +223,14 @@ actor SelectionMonitor {
         // Mark as fired immediately (Python does this)
         firedText = trimmed
 
-        // Fire callback immediately (like Python), then set up Cmd+C suppression
-        appLog("[Monitor] Firing: \(isWord ? "word" : "text") (\(trimmed.count) chars) from \(sourceApp): \(trimmed.prefix(50))...")
+        // Fire callback immediately, then arm Cmd+C suppression:
+        // if user later copies this exact text, cancel the translation.
+        appLog("[Monitor] Firing: \(isWord ? "word" : "text") (\(appLogTextSummary(trimmed))) from \(sourceApp)")
         callback(trimmed, isWord, sourceApp, sourceUrl)
 
-        // Set up Cmd+C suppression window: if user presses Cmd+C within 300ms,
-        // the next checkPendingSuppression() will cancel the translation
         pendingText = trimmed
-        pendingIsWord = isWord
-        pendingSourceApp = sourceApp
-        pendingSourceUrl = sourceUrl
-        pendingDeadline = Date().addingTimeInterval(0.3)
         pendingClipboardCount = NSPasteboard.general.changeCount
+        appLog("[Monitor] Suppression armed: clipCount=\(pendingClipboardCount), text=\(appLogTextSummary(trimmed))")
     }
 
     private func getSelectedText(mouseJustReleased: Bool) -> (String, String, String)? {
@@ -315,8 +302,12 @@ actor SelectionMonitor {
                 if appName != lastFocusedApp {
                     appLog("[Monitor] App '\(appName)' (alt: '\(appNameAlt)') not in whitelist, skipping")
                     lastFocusedApp = appName
-                    lastClipboardChangeCount = NSPasteboard.general.changeCount
                     appJustSwitched = true
+                    // Refresh suppression baseline — clipboard may change during app switch
+                    // (e.g., TransReader window appearing), don't let that consume pending.
+                    if pendingText != nil {
+                        pendingClipboardCount = NSPasteboard.general.changeCount
+                    }
                 }
                 return nil
             }
@@ -326,8 +317,11 @@ actor SelectionMonitor {
         if appName != lastFocusedApp {
             appLog("[Monitor] App switched to '\(appName)' (included: ✓)")
             lastFocusedApp = appName
-            lastClipboardChangeCount = NSPasteboard.general.changeCount
             appJustSwitched = true
+            // Refresh suppression baseline — clipboard may change during app switch
+            if pendingText != nil {
+                pendingClipboardCount = NSPasteboard.general.changeCount
+            }
             return nil
         }
 
@@ -335,12 +329,16 @@ actor SelectionMonitor {
         // translate text that was already selected before the switch
         if appJustSwitched {
             appJustSwitched = false
+            // Refresh suppression baseline after switch settles
+            if pendingText != nil {
+                pendingClipboardCount = NSPasteboard.general.changeCount
+            }
             // Read current selection and store as firedText (baseline)
             if let sel = getAXSelectedText(from: focusedAppEl) {
                 let trimmed = sel.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
                     firedText = trimmed
-                    appLog("[Monitor] Baseline selection on app switch: \(trimmed.prefix(40))...")
+                    appLog("[Monitor] Baseline selection on app switch: \(appLogTextSummary(trimmed))")
                 }
             }
             return nil
@@ -364,16 +362,6 @@ actor SelectionMonitor {
                         }
                     }
                 }
-            }
-        }
-
-        // Clipboard translate mode
-        if clipboardTranslateEnabled {
-            if let clipText = getClipboardIfChanged() {
-                // Handle clipboard text with relaxed filtering (supports all languages)
-                handleText(clipText, sourceApp: appName, sourceUrl: sourceUrl, isFromClipboard: true)
-                // Return nil to prevent double-handling via normal AX path
-                return nil
             }
         }
 
@@ -483,14 +471,6 @@ actor SelectionMonitor {
             }
         }
 
-        // Last resort: Cmd+C fallback for any role when all AX tiers fail
-        if mouseJustReleased {
-            if let text = simulateCmdCAndGetText() {
-                appLog("[Monitor] Got text via Cmd+C last-resort fallback (role=\(role))")
-                return (text, appName, sourceUrl)
-            }
-        }
-
         return nil
     }
 
@@ -507,53 +487,6 @@ actor SelectionMonitor {
         var ref: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &ref)
         guard err == .success, let text = ref as? String else { return nil }
-        return text
-    }
-
-    private func getClipboardIfChanged() -> String? {
-        let currentCount = NSPasteboard.general.changeCount
-        guard currentCount != lastClipboardChangeCount else {
-            return nil
-        }
-
-        lastClipboardChangeCount = currentCount
-
-        // Suppress if clipboard change was caused by our own simulateCmdC
-        if suppressClipboardWatch {
-            appLog("[Monitor] Clipboard change suppressed (simulateCmdC in progress)")
-            return nil
-        }
-
-        // Skip if frontmost app is TransReader itself
-        if let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-           bundleId.lowercased().contains("transreader") {
-            appLog("[Monitor] Clipboard change from self, skipping")
-            return nil
-        }
-
-        // Debounce: skip if last clipboard fire was <500ms ago
-        let now = Date()
-        if now.timeIntervalSince(lastClipboardFireTime) < 0.5 {
-            return nil
-        }
-
-        // Check that clipboard actually contains string data
-        guard let types = NSPasteboard.general.types, types.contains(.string) else {
-            return nil
-        }
-
-        guard let text = NSPasteboard.general.string(forType: .string) else {
-            return nil
-        }
-
-        // Size limit: skip very large clipboard content (e.g. entire files)
-        let maxLength = 5000
-        if text.count > maxLength {
-            appLog("[Monitor] Clipboard text too large (\(text.count) chars), skipping")
-            return nil
-        }
-
-        lastClipboardFireTime = now
         return text
     }
 
@@ -611,22 +544,35 @@ actor SelectionMonitor {
     }
 
     private func simulateCmdCAndGetText() -> String? {
-        // Suppress clipboard watch to prevent double-triggering
-        suppressClipboardWatch = true
-        defer { suppressClipboardWatch = false }
-
         let beforeCount = NSPasteboard.general.changeCount
+        let beforeText = NSPasteboard.general.string(forType: .string)
         simulateCmdC()
         Thread.sleep(forTimeInterval: 0.1)  // 100ms wait like Python
         let afterCount = NSPasteboard.general.changeCount
 
+        // Always update the pending baseline so our own simulation doesn't
+        // false-trigger checkPendingSuppression on the next mouseWatcher tick.
         if afterCount != beforeCount {
-            lastClipboardChangeCount = afterCount
-            if let text = NSPasteboard.general.string(forType: .string), !text.isEmpty {
-                return text
-            }
+            pendingClipboardCount = afterCount
         }
-        return nil
+
+        // No clipboard write at all → nothing was selected
+        guard afterCount != beforeCount else {
+            return nil
+        }
+
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            return nil
+        }
+
+        // Second safety: if Cmd+C "wrote" the same content that was already there,
+        // the app had nothing new to copy — treat as no selection. This catches
+        // Chrome's no-op writes on button clicks that still bump changeCount.
+        if text == beforeText {
+            return nil
+        }
+
+        return text
     }
 
     private func simulateCmdC() {

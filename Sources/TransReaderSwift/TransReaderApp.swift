@@ -12,7 +12,7 @@ struct TransReaderApp: App {
         if let stage = appState.updateStage {
             switch stage {
             case .checking:       return "译🔍"
-            case .downloading:    return "译⬇️"
+            case .downloading:    return "⬇️"
             case .extracting, .installing: return "译📦"
             case .relaunching:    return "译🔄"
             }
@@ -33,11 +33,12 @@ struct TransReaderApp: App {
                 .frame(minWidth: 200, minHeight: 200)
                 .translationErrorAlert(appState: appState)
                 .translocationAlert(appState: appState)
+                .onOpenURL { url in
+                    handleURL(url)
+                }
                 .onAppear {
                     setupHotkeyCallbacks()
                     appState.setupHotkeys()
-                    appState.waitForAccessibilityAndRestart()
-                    appState.notificationService.requestPermission()
                     appState.handleTranslocationIfNeeded()
                     // Show window on launch (like Python)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -63,7 +64,7 @@ struct TransReaderApp: App {
                         showMainWindow()
                     }
                 } catch {
-                    appState.error = error.localizedDescription
+                    // appState.error = error.localizedDescription
                 }
             }
         }
@@ -115,6 +116,17 @@ struct TransReaderApp: App {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    private func handleURL(_ url: URL) {
+        guard url.scheme == "transreader" else { return }
+        let host = url.host ?? ""
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard host == "translate" || path == "translate" else { return }
+
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let text = components?.queryItems?.first(where: { $0.name == "text" })?.value ?? ""
+        appState.translateFromPopClip(text)
     }
 }
 
@@ -183,7 +195,7 @@ struct MenuBarView: View {
                     appState.configStore.setProvider(providerID)
                 }) {
                     HStack {
-                        Text(Providers.all[providerID]!.name)
+                        Text(Providers.provider(for: providerID).name)
                         if providerID == appState.configStore.provider {
                             Image(systemName: "checkmark")
                         }

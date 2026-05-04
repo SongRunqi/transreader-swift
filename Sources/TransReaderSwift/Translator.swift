@@ -35,7 +35,8 @@ actor Translator {
             throw TranslatorError.noAPIKey
         }
 
-        let provider = Providers.all[configStore.provider]!
+        let providerId = configStore.provider
+        let provider = Providers.provider(for: providerId)
         let url = URL(string: "\(provider.baseURL)/chat/completions")!
 
         var request = URLRequest(url: url, timeoutInterval: configStore.requestTimeout)
@@ -43,8 +44,9 @@ actor Translator {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let model = configStore.modelForProvider(configStore.provider)
-        let payload: [String: Any] = [
+        let model = configStore.modelForProvider(providerId)
+        let mode = configStore.displayMode.rawValue
+        var payload: [String: Any] = [
             "model": model,
             "temperature": 0.3,
             "stream": true,
@@ -53,9 +55,15 @@ actor Translator {
                 ["role": "user", "content": text]
             ]
         ]
+        if providerId == "deepseek", model.hasPrefix("deepseek-v4-") {
+            payload["thinking"] = ["type": "disabled"]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
+        let requestStart = Date()
+        appLog("[Translate] Request provider=\(providerId) model=\(model) mode=\(mode) text=\(appLogTextSummary(text))")
         let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
+        appLog("[Translate] Response headers in \(elapsedMs(since: requestStart))ms")
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
@@ -75,6 +83,10 @@ actor Translator {
         var tipStreamed = ""
         var allStreamedChunks: [Chunk] = []
         var chunksEmitted = 0
+        var didLogFirstReasoning = false
+        var didLogFirstContent = false
+        var didLogFirstPartial = false
+        var didLogFirstComplete = false
 
         // Inline streaming loop — cancellation propagates via Task.checkCancellation()
         do {
@@ -88,8 +100,20 @@ actor Translator {
 
                 guard let data = dataStr.data(using: .utf8),
                       let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data),
-                      let content = chunk.choices.first?.delta.content else {
+                      let delta = chunk.choices.first?.delta else {
                     continue
+                }
+                if let reasoning = delta.reasoningContent, !reasoning.isEmpty {
+                    if !didLogFirstReasoning {
+                        didLogFirstReasoning = true
+                        appLog("[Translate] First reasoning content in \(elapsedMs(since: requestStart))ms")
+                    }
+                    continue
+                }
+                guard let content = delta.content else { continue }
+                if !didLogFirstContent {
+                    didLogFirstContent = true
+                    appLog("[Translate] First stream content in \(elapsedMs(since: requestStart))ms")
                 }
 
                 accumulated += content
@@ -110,6 +134,10 @@ actor Translator {
                     sentence.isPartial = false
                     completeSentences.append(sentence)
                     await onSentence(sentence)
+                    if !didLogFirstComplete {
+                        didLogFirstComplete = true
+                        appLog("[Translate] First complete sentence in \(elapsedMs(since: requestStart))ms")
+                    }
                     completeIndex += 1
                     // Reset streaming state for next sentence
                     enStreamed = ""
@@ -199,6 +227,10 @@ actor Translator {
                         index: completeIndex
                     )
                     await onSentence(sentence)
+                    if !didLogFirstPartial {
+                        didLogFirstPartial = true
+                        appLog("[Translate] First partial UI update in \(elapsedMs(since: requestStart))ms")
+                    }
                 }
             }
 
@@ -226,6 +258,10 @@ actor Translator {
         }
 
         return completeSentences
+    }
+
+    private func elapsedMs(since start: Date) -> Int {
+        Int(Date().timeIntervalSince(start) * 1000)
     }
 
     // MARK: - JSON Object Extraction
@@ -256,14 +292,12 @@ actor Translator {
             let jsonStr = String(remaining[..<endIndex])
             if let data = jsonStr.data(using: .utf8) {
                 do {
-                    let compactJson = jsonStr.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "  ", with: "")
-                    appLog("[Translate] Raw JSON: \(compactJson)")
                     let obj = try JSONDecoder().decode(Sentence.self, from: data)
-                    appLog("[Translate] Decoded sentence: en=\(obj.en.prefix(80)), zh=\(obj.zh.prefix(80)), chunks=\(obj.analysis?.chunks.count ?? 0)")
+                    appLog("[Translate] Decoded sentence: en=\(appLogTextSummary(obj.en)), zh=\(appLogTextSummary(obj.zh)), chunks=\(obj.analysis?.chunks.count ?? 0)")
                     if let chunks = obj.analysis?.chunks {
                         func logChunks(_ chunks: [Chunk], indent: String = "  ") {
                             for (i, c) in chunks.enumerated() {
-                                appLog("[Translate] \(indent)chunk[\(i)] role=\(c.role) en=\"\(c.en.prefix(60))\" zh=\"\(c.zh.prefix(60))\" children=\(c.children?.count ?? 0)")
+                                appLog("[Translate] \(indent)chunk[\(i)] role=\(c.role) en=\(appLogTextSummary(c.en)) zh=\(appLogTextSummary(c.zh)) children=\(c.children?.count ?? 0)")
                                 if let kids = c.children { logChunks(kids, indent: indent + "  ") }
                             }
                         }
@@ -272,7 +306,7 @@ actor Translator {
                     objects.append(obj)
                 } catch {
                     appLog("[Translate] JSON decode error: \(error.localizedDescription)")
-                    appLog("[Translate] JSON fragment: \(jsonStr.prefix(200))")
+                    appLog("[Translate] JSON fragment length: \(jsonStr.count) chars")
                 }
             }
 
@@ -548,5 +582,11 @@ private struct StreamChunk: Codable {
 
     struct Delta: Codable {
         let content: String?
+        let reasoningContent: String?
+
+        enum CodingKeys: String, CodingKey {
+            case content
+            case reasoningContent = "reasoning_content"
+        }
     }
 }

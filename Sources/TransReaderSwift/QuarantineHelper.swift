@@ -35,6 +35,22 @@ enum QuarantineHelper {
         }
     }
 
+    static func teamIdentifier(at appPath: String) -> String? {
+        do {
+            let output = try runProcess("/usr/bin/codesign",
+                                        arguments: ["-dv", "--verbose=4", appPath])
+            for line in output.components(separatedBy: .newlines) {
+                if line.hasPrefix("TeamIdentifier=") {
+                    let value = line.replacingOccurrences(of: "TeamIdentifier=", with: "")
+                    return value == "not set" ? nil : value
+                }
+            }
+        } catch {
+            appLog("[Quarantine] Team identifier read failed: \(error.localizedDescription)")
+        }
+        return nil
+    }
+
     /// Re-sign with ad-hoc signature only if the existing signature is corrupted.
     /// Under normal circumstances (ditto copy), this should NOT be called —
     /// re-signing invalidates the AX permission hash.

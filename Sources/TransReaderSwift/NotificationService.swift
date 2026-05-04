@@ -19,6 +19,9 @@ final class NotificationService: NSObject, @unchecked Sendable {
         self.configStore = configStore
         super.init()
         UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            self?.permissionGranted = settings.authorizationStatus == .authorized
+        }
     }
 
     // MARK: - Permission
@@ -37,8 +40,13 @@ final class NotificationService: NSObject, @unchecked Sendable {
     // MARK: - Send Notification
 
     func send(title: String, body: String, category: Category) {
-        guard permissionGranted else { return }
         guard configStore.config.notificationsEnabled else { return }
+        guard permissionGranted else {
+            UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+                self?.permissionGranted = settings.authorizationStatus == .authorized
+            }
+            return
+        }
 
         // Check per-category toggle
         switch category {

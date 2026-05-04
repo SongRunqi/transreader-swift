@@ -9,7 +9,6 @@ struct SettingsView: View {
     @State private var customModel: String = ""
     @State private var requestTimeout: Int
     @State private var monitorInterval: Int
-    @State private var clipboardTranslate: Bool
     @State private var includedAppsText: String = ""
     @State private var excludedUrlsText: String = ""
     @State private var customPrompt: String = ""
@@ -30,16 +29,16 @@ struct SettingsView: View {
         self._showSettings = showSettings
 
         let config = appState.configStore.config
-        self._selectedProvider = State(initialValue: config.provider)
+        let provider = appState.configStore.provider
+        self._selectedProvider = State(initialValue: provider)
         self._requestTimeout = State(initialValue: config.requestTimeout)
         self._monitorInterval = State(initialValue: config.monitorInterval)
-        self._clipboardTranslate = State(initialValue: config.clipboardTranslateEnabled)
         self._includedAppsText = State(initialValue: config.includedApps.joined(separator: "\n"))
         self._excludedUrlsText = State(initialValue: config.excludedUrls.joined(separator: "\n"))
         self._customPrompt = State(initialValue: config.systemPrompt ?? "")
         self._vocabFilePath = State(initialValue: config.vocabFile)
-        self._apiKey = State(initialValue: config.apiKeys[config.provider] ?? "")
-        self._customModel = State(initialValue: config.customModels[config.provider] ?? "")
+        self._apiKey = State(initialValue: appState.configStore.apiKey(for: provider) ?? "")
+        self._customModel = State(initialValue: config.customModels[provider] ?? "")
         self._shortcuts = State(initialValue: config.shortcuts)
         self._displayMode = State(initialValue: config.displayMode)
         self._longTextThreshold = State(initialValue: config.longTextThreshold)
@@ -78,7 +77,7 @@ struct SettingsView: View {
                         Text("自定义模型（留空使用默认）")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(Theme.textSecondary)
-                        TextField("默认: \(Providers.all[selectedProvider]?.model ?? "")", text: $customModel)
+                        TextField("默认: \(Providers.provider(for: selectedProvider).model)", text: $customModel)
                             .textFieldStyle(.plain)
                             .font(.system(size: 13, design: .monospaced))
                             .padding(8)
@@ -132,13 +131,36 @@ struct SettingsView: View {
 
                 // Monitor settings
                 settingsSection("监控设置") {
-                    HStack {
-                        Toggle("剪贴板翻译 (Cmd+C)", isOn: $clipboardTranslate)
-                            .font(.system(size: 13))
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("默认触发方式")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.textPrimary)
+                            Spacer()
+                            Text("PopClip")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.accent)
+                        }
+
+                        Text("选中文本后点击 PopClip 的“译”按钮触发翻译；划词监控是可选的高级模式。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+
+                        Text(popClipSnippet)
+                            .font(.system(size: 12, design: .monospaced))
+                            .textSelection(.enabled)
                             .foregroundStyle(Theme.textPrimary)
-                            .toggleStyle(.switch)
-                            .tint(Theme.accent)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(Theme.bg)
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Theme.border, lineWidth: 1)
+                            )
                     }
+
+                    Divider()
 
                     settingsField("轮询间隔", suffix: "ms") {
                         HStack(spacing: 4) {
@@ -390,13 +412,13 @@ struct SettingsView: View {
     private var providerCards: some View {
         FlowLayout(spacing: 8) {
             ForEach(Array(Providers.all.keys.sorted()), id: \.self) { id in
-                let provider = Providers.all[id]!
+                let provider = Providers.provider(for: id)
                 let isSelected = selectedProvider == id
-                let hasKey = !(appState.configStore.config.apiKeys[id] ?? "").isEmpty
+                let hasKey = appState.configStore.hasAPIKey(for: id)
 
                 Button {
                     selectedProvider = id
-                    apiKey = appState.configStore.config.apiKeys[id] ?? ""
+                    apiKey = appState.configStore.apiKey(for: id) ?? ""
                     customModel = appState.configStore.config.customModels[id] ?? ""
                 } label: {
                     HStack(spacing: 6) {
@@ -470,7 +492,16 @@ struct SettingsView: View {
 
     // MARK: - Helpers
     private var currentProviderName: String {
-        Providers.all[selectedProvider]?.name ?? selectedProvider
+        Providers.provider(for: selectedProvider).name
+    }
+
+    private var popClipSnippet: String {
+        """
+        #popclip
+        name: TransReader
+        icon: 译
+        url: transreader://translate?text={popclip text}
+        """
     }
 
     private func settingsSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -519,6 +550,28 @@ struct SettingsView: View {
     }
 
     private func saveSettings() {
+        let selectedProvider = selectedProvider
+        let apiKey = apiKey
+        let customModel = customModel
+        let requestTimeout = requestTimeout
+        let monitorInterval = monitorInterval
+        let includedApps = includedAppsText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let excludedUrls = excludedUrlsText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let customPrompt = customPrompt
+        let vocabFilePath = vocabFilePath
+        let shortcuts = shortcuts
+        let displayMode = displayMode
+        let longTextThreshold = longTextThreshold
+        let notificationsEnabled = notificationsEnabled
+        let notifyOnTranslationDone = notifyOnTranslationDone
+        let notifyOnError = notifyOnError
+        let notifyOnLongOperation = notifyOnLongOperation
+        let longOperationThreshold = longOperationThreshold
+
         appState.configStore.update { config in
             config.provider = selectedProvider
             config.apiKeys[selectedProvider] = apiKey.isEmpty ? nil : apiKey
@@ -529,13 +582,8 @@ struct SettingsView: View {
             }
             config.requestTimeout = requestTimeout
             config.monitorInterval = monitorInterval
-            config.clipboardTranslateEnabled = clipboardTranslate
-            config.includedApps = includedAppsText.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-            config.excludedUrls = excludedUrlsText.components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
+            config.includedApps = includedApps
+            config.excludedUrls = excludedUrls
             config.systemPrompt = customPrompt.isEmpty ? nil : customPrompt
             config.vocabFile = vocabFilePath
             config.shortcuts = shortcuts
@@ -781,6 +829,14 @@ class ShortcutRecorderNSView: NSView {
         } else if let chars = event.charactersIgnoringModifiers, !chars.isEmpty {
             parts.append(chars.lowercased())
         } else {
+            return
+        }
+
+        // Reject system-critical combos (would break copy/paste/quit/etc.)
+        // Allow if user adds extra modifiers like option/shift/ctrl.
+        let reservedCmdKeys: Set<String> = ["c", "v", "x", "a", "z", "q", "w", "s", "f", "n", "t", "p", "o"]
+        if mods == .command, let last = parts.last, reservedCmdKeys.contains(last) {
+            NSSound.beep()
             return
         }
 

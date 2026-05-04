@@ -3,8 +3,8 @@
 
 APP_NAME     := TransReader
 BUNDLE_ID    := com.transreader.swift
-VERSION      := 2.0.1
-BUILD_NUMBER := 1
+VERSION      := 2.0.2
+BUILD_NUMBER := 2
 
 SPM_BUILD_DIR := .build
 OUT_DIR      := build
@@ -45,25 +45,33 @@ bundle: build ## Create .app bundle (only copies binary if changed)
 		echo "▸ Bundle up to date."; \
 	fi
 	@# Always ensure Info.plist exists
-	@if [ ! -f "$(CONTENTS_DIR)/Info.plist" ]; then \
-		printf '%s\n' \
-			'<?xml version="1.0" encoding="UTF-8"?>' \
-			'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-			'<plist version="1.0">' \
-			'<dict>' \
-			'  <key>CFBundleIdentifier</key>'  '<string>$(BUNDLE_ID)</string>' \
-			'  <key>CFBundleName</key>'        '<string>$(APP_NAME)</string>' \
-			'  <key>CFBundleDisplayName</key>' '<string>$(APP_NAME)</string>' \
-			'  <key>CFBundleExecutable</key>'  '<string>TransReaderSwift</string>' \
-			'  <key>CFBundleVersion</key>'     '<string>$(BUILD_NUMBER)</string>' \
-			'  <key>CFBundleShortVersionString</key>' '<string>$(VERSION)</string>' \
-			'  <key>CFBundlePackageType</key>' '<string>APPL</string>' \
-			'  <key>CFBundleIconFile</key>'    '<string>AppIcon</string>' \
-			'  <key>LSUIElement</key>'         '<false/>' \
-			'</dict>' \
-			'</plist>' > "$(CONTENTS_DIR)/Info.plist"; \
-		touch "$(OUT_DIR)/.needs-sign"; \
-	fi
+	@printf '%s\n' \
+		'<?xml version="1.0" encoding="UTF-8"?>' \
+		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+		'<plist version="1.0">' \
+		'<dict>' \
+		'  <key>CFBundleIdentifier</key>'  '<string>$(BUNDLE_ID)</string>' \
+		'  <key>CFBundleName</key>'        '<string>$(APP_NAME)</string>' \
+		'  <key>CFBundleDisplayName</key>' '<string>$(APP_NAME)</string>' \
+		'  <key>CFBundleExecutable</key>'  '<string>TransReaderSwift</string>' \
+		'  <key>CFBundleVersion</key>'     '<string>$(BUILD_NUMBER)</string>' \
+		'  <key>CFBundleShortVersionString</key>' '<string>$(VERSION)</string>' \
+		'  <key>CFBundlePackageType</key>' '<string>APPL</string>' \
+		'  <key>CFBundleIconFile</key>'    '<string>AppIcon</string>' \
+		'  <key>LSUIElement</key>'         '<false/>' \
+		'  <key>CFBundleURLTypes</key>' \
+		'  <array>' \
+		'    <dict>' \
+		'      <key>CFBundleURLName</key>' '<string>$(BUNDLE_ID)</string>' \
+		'      <key>CFBundleURLSchemes</key>' \
+		'      <array>' \
+		'        <string>transreader</string>' \
+		'      </array>' \
+		'    </dict>' \
+		'  </array>' \
+		'</dict>' \
+		'</plist>' > "$(CONTENTS_DIR)/Info.plist"
+	@touch "$(OUT_DIR)/.needs-sign"
 	@mkdir -p "$(CONTENTS_DIR)/Resources"
 	@if [ -f "Resources/AppIcon.icns" ]; then cp "Resources/AppIcon.icns" "$(CONTENTS_DIR)/Resources/AppIcon.icns"; fi
 	@if [ ! -f "$(ENTITLEMENTS)" ]; then \

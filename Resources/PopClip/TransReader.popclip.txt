@@ -1,0 +1,4 @@
+#popclip
+name: TransReader
+icon: 译
+url: transreader://translate?text={popclip text}
